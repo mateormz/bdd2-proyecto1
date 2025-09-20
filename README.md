@@ -14,7 +14,7 @@ docker compose up --build -d
 ## Estructura
 
 ```plaintext
-cs2702-proyecto1/
+bdd2-proyecto1/
 ├─ README.md
 ├─ .gitignore
 ├─ .env
