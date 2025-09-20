@@ -13,7 +13,8 @@ docker compose up --build -d
 
 ## Estructura
 
-bdd2-proyecto1/
+```plaintext
+cs2702-proyecto1/
 ├─ README.md
 ├─ .gitignore
 ├─ .env
@@ -21,7 +22,7 @@ bdd2-proyecto1/
 ├─ Dockerfile
 ├─ requirements.txt
 ├─ data/                # Datasets
-├─ out/                 # Binarios generados (.dat, .idx)
+├─ out/                 # Binarios generados (.dat, .idx, logs)
 └─ src/
    ├─ app.py            # API principal FastAPI
    ├─ parser_sql.py     # ParserSQL
@@ -34,3 +35,4 @@ bdd2-proyecto1/
    ├─ rtree_adapter.py  # RTree
    ├─ io_counters.py    # Métricas de I/O y tiempos
    └─ utils.py          # Helpers: carga de CSV, validaciones, etc.
+```
