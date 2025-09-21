@@ -9,10 +9,12 @@ Repo mínimo para levantar la API con Docker Compose.
 
 ```bash
 docker compose up --build -d
+```
 
 ## Estructura
 
 ```plaintext
+bdd2-proyecto1/
 ├─ README.md
 ├─ backend
 │   ├─ Dockerfile
