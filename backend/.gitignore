@@ -11,8 +11,6 @@ __pycache__/
 
 # Datos locales
 .env
-data/
-out/
 
 # Misc
 .DS_Store
