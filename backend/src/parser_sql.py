@@ -62,3 +62,51 @@ class SQLParserError(Exception):
 
 # Update
 # Transaction
+
+# Parser
+class ParserSQL:
+    def __init__(self):
+        self.tokens: List[str] = []
+        self.current_token: int = 0
+
+    def parse(self, sql_query: str):
+        sql_query = self._normalize_query(sql_query)
+        self.tokens = self._tokenize(sql_query)
+        self.current_token = 0
+
+        if not self.tokens:
+            raise SQLParserError("Query vacía")
+
+        command = self.tokens[0].upper()
+        if command == "CREATE":
+            return self._parse_create_table()
+        elif command == "SELECT":
+            return self._parse_select()
+        elif command == "INSERT":
+            return self._parse_insert()
+        elif command == "DELETE":
+            return self._parse_delete()
+        else:
+            raise SQLParserError(f"Comando no soportado: {command}")
+    
+    # Quita comentarios y espacios extra
+    def _normalize_query(self, query: str) -> str:
+        query = re.sub(r'--.*', '', query) # "-- Comentario"
+        query = re.sub(r'/\*.*?\*/', '', query, flags=re.DOTALL) # "/* Comentario */"
+        return ' '.join(query.split()).strip()
+    
+    def _tokenize(self, query: str) -> List[str]:
+        pattern = r'''
+            "([^"]*)"                    |  # strings dobles
+            '([^']*)'                    |  # strings simples
+            \b\d+\.\d+\b                |  # decimales
+            \b\d+\b                     |  # enteros
+            \b[A-Za-z_][A-Za-z0-9_]*\b  |  # identificadores
+            [(),\[\]{}]                 |  # delimitadores
+            [<>=!]+                     |  # operadores
+            \S                             # otro símbolo
+        '''
+        tokens: List[str] = []
+        for m in re.finditer(pattern, query, re.VERBOSE):
+            tokens.append(m.group(0))
+        return tokens
