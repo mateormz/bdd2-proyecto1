@@ -110,3 +110,21 @@ class ParserSQL:
         for m in re.finditer(pattern, query, re.VERBOSE):
             tokens.append(m.group(0))
         return tokens
+    
+    def _current_token(self) -> str:
+        return "" if self.current_token >= len(self.tokens) else self.tokens[self.current_token]
+
+    def _peek_token(self, offset: int = 1) -> str:
+        pos = self.current_token + offset
+        return "" if pos >= len(self.tokens) else self.tokens[pos]
+
+    def _consume_token(self) -> str:
+        tok = self._current_token()
+        self.current_token += 1
+        return tok
+
+    def _expect_token(self, expected: str) -> str:
+        tok = self._consume_token()
+        if tok.upper() != expected.upper():
+            raise SQLParserError(f"Se esperaba '{expected}', se encontró '{tok}'")
+        return tok
