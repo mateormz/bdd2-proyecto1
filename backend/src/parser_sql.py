@@ -111,6 +111,7 @@ class ParserSQL:
             tokens.append(m.group(0))
         return tokens
     
+    # Cursor
     def _current_token(self) -> str:
         return "" if self.current_token >= len(self.tokens) else self.tokens[self.current_token]
 
@@ -128,3 +129,69 @@ class ParserSQL:
         if tok.upper() != expected.upper():
             raise SQLParserError(f"Se esperaba '{expected}', se encontró '{tok}'")
         return tok
+    
+    def _parse_create_table(self):
+        self._consume_token()        # CREATE
+        self._expect_token("TABLE")
+        table_name = self._consume_token()
+
+        if self._current_token().upper() == "FROM":
+            return self._parse_create_from_file(table_name)
+        else:
+            return self._parse_create_with_schema(table_name)
+        
+    def _parse_create_with_schema(self, table_name: str):
+        self._expect_token("(")
+        columns: List[Column] = []
+
+        while self._current_token() != ")":
+            columns.append(self._parse_column_definition())
+            if self._current_token() == ",":
+                self._consume_token()
+            elif self._current_token() != ")":
+                raise SQLParserError("Se esperaba ',' o ')' después de una columna")
+
+        self._expect_token(")")
+        return CreateTableStatement(table_name, columns)
+
+    def _parse_column_definition(self) -> Column:
+        name = self._consume_token()
+
+        data_type_str = self._consume_token().upper()
+        size = None
+        is_array = False
+        array_type = None
+
+        if data_type_str == "VARCHAR":
+            self._expect_token("[")
+            size = int(self._consume_token())
+            self._expect_token("]")
+            data_type = DataType.VARCHAR
+        elif data_type_str == "ARRAY":
+            is_array = True
+            self._expect_token("[")
+            array_type_str = self._consume_token().upper()
+            self._expect_token("]")
+            array_type = DataType(array_type_str)
+            data_type = DataType.ARRAY
+        else:
+            data_type = DataType(data_type_str)
+
+        is_key = False
+        index_type: Optional[IndexType] = None
+        while self.current_token < len(self.tokens) and self._current_token() not in [",", ")"]:
+            modifier = self._consume_token().upper()
+            if modifier == "KEY":
+                is_key = True
+            elif modifier == "INDEX":
+                index_name = self._consume_token().upper()
+                index_map = {
+                    "SEQ": IndexType.SEQUENTIAL, "AVL": IndexType.AVLTREE,
+                    "ISAM": IndexType.ISAM, "BTREE": IndexType.BTREE,
+                    "EXTHASH": IndexType.EXTENDIBLE_HASH, "RTREE": IndexType.RTREE
+                }
+                index_type = index_map.get(index_name)
+                if not index_type:
+                    raise SQLParserError(f"Tipo de índice no soportado: {index_name}")
+
+        return Column(name, data_type, size, is_key, index_type, is_array, array_type)
