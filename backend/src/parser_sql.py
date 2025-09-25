@@ -195,3 +195,39 @@ class ParserSQL:
                     raise SQLParserError(f"Tipo de índice no soportado: {index_name}")
 
         return Column(name, data_type, size, is_key, index_type, is_array, array_type)
+    
+def parse_sql(query: str):
+    parser = ParserSQL()
+    stmt = parser.parse(query)
+    return stmt
+
+if __name__ == "__main__":
+    tests = [
+        """CREATE TABLE Empleados (
+            id INT KEY INDEX SEQ,
+            nombre VARCHAR[30] INDEX BTree,
+            edad INT,
+            salario FLOAT
+        )""",
+
+        """CREATE TABLE Restaurantes (
+            id INT KEY INDEX ISAM,
+            nombre VARCHAR[40],
+            ubicacion ARRAY[FLOAT] INDEX RTree
+        )""",
+
+        """CREATE TABLE Cursos (
+            codigo VARCHAR[10] KEY,
+            titulo VARCHAR[60],
+            creditos INT
+        )"""
+    ]
+
+    for i, q in enumerate(tests, 1):
+        try:
+            print(f"\n== Test {i} ==")
+            print(q)
+            result = parse_sql(q)
+            print("Resultado:", result)
+        except Exception as e:
+            print("ERROR:", e)
