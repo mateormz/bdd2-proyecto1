@@ -196,31 +196,102 @@ class ParserSQL:
 
         return Column(name, data_type, size, is_key, index_type, is_array, array_type)
     
+    def _parse_create_from_file(self, table_name: str):
+        self._expect_token("FROM")
+        self._expect_token("FILE")
+        file_path = self._consume_token().strip('"\'')  # permite comillas
+
+        using_index = None
+        if self._current_token().upper() == "USING":
+            self._consume_token()
+            self._expect_token("INDEX")
+            index_name = self._consume_token().upper()
+            self._expect_token("(")
+            column_name = self._consume_token().strip('"\'')
+            self._expect_token(")")
+            index_map = {
+                "ISAM": IndexType.ISAM, "SEQ": IndexType.SEQUENTIAL,
+                "BTREE": IndexType.BTREE, "EXTHASH": IndexType.EXTENDIBLE_HASH,
+                "RTREE": IndexType.RTREE
+            }
+            index_type = index_map.get(index_name)
+            if not index_type:
+                raise SQLParserError(f"Tipo de índice no soportado: {index_name}")
+            using_index = (index_type, column_name)
+
+        return CreateTableStatement(table_name, [], file_path, using_index)
+
+    def _parse_select(self):
+        self._consume_token()  # SELECT
+
+        columns: List[str] = []
+        if self._current_token() == "*":
+            columns = ["*"]
+            self._consume_token()
+        else:
+            while True:
+                columns.append(self._consume_token())
+                if self._current_token() == ",": self._consume_token()
+                else: break
+
+        self._expect_token("FROM")
+        table_name = self._consume_token()
+
+        where_clause = None
+        spatial_query = None
+        if self._current_token().upper() == "WHERE":
+            self._consume_token()
+            where_clause, spatial_query = self._parse_where_clause()
+
+        return SelectStatement(table_name, columns, where_clause, spatial_query)
+    
+    def _parse_where_clause(self):
+        column = self._consume_token()
+        operator = self._consume_token()
+
+        if operator.upper() == "IN" and self._current_token() == "(":
+            return None, self._parse_spatial_query(column)
+
+        if operator.upper() == "BETWEEN":
+            a = self._parse_value(); self._expect_token("AND"); b = self._parse_value()
+            return {"type": "range", "column": column, "start": a, "end": b}, None
+        else:
+            val = self._parse_value()
+            return {"type": "equality", "column": column, "operator": operator, "value": val}, None
+
+    def _parse_spatial_query(self, column: str):
+        self._expect_token("(")
+        head = self._consume_token()
+        self._expect_token(",")
+        payload = self._parse_value()
+        self._expect_token(")")
+
+        if head.lower() == "point":
+            if not (isinstance(payload, list) and (2 <= len(payload) <= 3)):
+                raise SQLParserError("Esperaba [lon, lat] o [lon, lat, radio]")
+            point = payload[:2]
+            radio = payload[2] if len(payload) == 3 else None
+            return {"type": "spatial_range", "column": column, "point": point, "radio": radio}
+        else:
+            k = int(head)
+            if not (isinstance(payload, list) and len(payload) == 2):
+                raise SQLParserError("Esperaba [lon, lat] para k-NN")
+            return {"type": "spatial_knn", "column": column, "point": payload, "k": k}
+    
 def parse_sql(query: str):
     parser = ParserSQL()
-    stmt = parser.parse(query)
-    return stmt
+    return parser.parse(query)
 
 if __name__ == "__main__":
     tests = [
-        """CREATE TABLE Empleados (
-            id INT KEY INDEX SEQ,
-            nombre VARCHAR[30] INDEX BTree,
-            edad INT,
-            salario FLOAT
-        )""",
+        # 1) Path con comillas dobles + ISAM
+        'CREATE TABLE Restaurantes FROM FILE "C:\\data\\restaurantes.csv" USING INDEX ISAM("id")',
 
-        """CREATE TABLE Restaurantes (
-            id INT KEY INDEX ISAM,
-            nombre VARCHAR[40],
-            ubicacion ARRAY[FLOAT] INDEX RTree
-        )""",
+        # 2) Path con comillas simples + SEQ
+        "create table Empleados from file 'C:/datasets/empleados.csv' using index seq('Employee_ID')",
 
-        """CREATE TABLE Cursos (
-            codigo VARCHAR[10] KEY,
-            titulo VARCHAR[60],
-            creditos INT
-        )"""
+        # 3) Sin USING INDEX (debería dejar using_index=None)
+        'CREATE TABLE Ventas FROM FILE "ventas_2024.csv"'
     ]
 
     for i, q in enumerate(tests, 1):
