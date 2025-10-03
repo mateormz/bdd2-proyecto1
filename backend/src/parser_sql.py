@@ -281,6 +281,23 @@ class ParserSQL:
             if not (isinstance(payload, list) and len(payload) == 2):
                 raise SQLParserError("Esperaba [lon, lat] para k-NN")
             return {"type": "spatial_knn", "column": column, "point": payload, "k": k}
+
+    def _parse_insert(self):
+        self._consume_token()      # INSERT
+        self._expect_token("INTO")
+        table_name = self._consume_token()
+        self._expect_token("VALUES")
+        self._expect_token("(")
+
+        values: List[Any] = []
+        while self._current_token() != ")":
+            values.append(self._parse_value())
+            if self._current_token() == ",": self._consume_token()
+            elif self._current_token() != ")":
+                raise SQLParserError("Se esperaba ',' o ')' en VALUES")
+
+        self._expect_token(")")
+        return InsertStatement(table_name, values)
         
     def _parse_value(self):
         tok = self._consume_token()
@@ -320,35 +337,17 @@ def parse_sql(query: str):
 
 if __name__ == "__main__":
     tests = [
-        # SELECT *
-        "select * from Empleados",
+        # 1) Insert simple numérico
+        "INSERT INTO Empleados VALUES (1, 30, 52000)",
 
-        # SELECT columnas específicas
-        "SELECT nombre, salario FROM Empleados",
+        # 2) Insert con strings
+        "insert into Empleados values (2, 'Ana', \"Marketing\")",
 
-        # SELECT con igualdad (numérica)
-        "select * from Empleados where id = 42",
+        # 3) Insert con array
+        "insert into Restaurantes values (10, 'Pizza Hut', [12.5, -77.0])",
 
-        # SELECT con igualdad (string; ¡con comillas!)
-        "select * from Empleados where nombre = 'Ana'",
-
-        # SELECT con BETWEEN numérico
-        "select * from Empleados where salario between 50000 and 100000",
-
-        # SELECT con BETWEEN string (rango lexicográfico)
-        "select * from Empleados where nombre between 'A' and 'M'",
-
-        # SELECT espacial: rango por punto + radio (2 o 3 valores)
-        "select * from Restaurantes where ubicacion in (point, [12.5, -77.0, 3])",
-
-        # SELECT espacial: k-NN (k, [lon, lat])
-        "select * from Restaurantes where ubicacion in (5, [12.5, -77.0])",
-
-        # SELECT con otro operador (el parser lo captura como 'operator')
-        "select * from Empleados where edad >= 30",
-
-        # Caso inválido (para ver el error): falta valor
-        "select * from Empleados where id ="
+        # 4) Caso inválido (paréntesis sin cerrar)
+        "INSERT INTO t1 VALUES (1, 2, 3"
     ]
 
     for i, q in enumerate(tests, 1):
