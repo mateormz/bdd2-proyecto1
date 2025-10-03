@@ -99,8 +99,8 @@ class ParserSQL:
         pattern = r'''
             "([^"]*)"                    |  # strings dobles
             '([^']*)'                    |  # strings simples
-            \b\d+\.\d+\b                |  # decimales
-            \b\d+\b                     |  # enteros
+            [+-]?\d+\.\d+                |  # decimales
+            [+-]?\d+                     |  # enteros
             \b[A-Za-z_][A-Za-z0-9_]*\b  |  # identificadores
             [(),\[\]{}]                 |  # delimitadores
             [<>=!]+                     |  # operadores
@@ -253,9 +253,13 @@ class ParserSQL:
             return None, self._parse_spatial_query(column)
 
         if operator.upper() == "BETWEEN":
-            a = self._parse_value(); self._expect_token("AND"); b = self._parse_value()
+            a = self._parse_value()
+            self._expect_token("AND")
+            b = self._parse_value()
             return {"type": "range", "column": column, "start": a, "end": b}, None
         else:
+            if self._current_token() in ("", ")"):
+                raise SQLParserError("Falta valor en cláusula WHERE")
             val = self._parse_value()
             return {"type": "equality", "column": column, "operator": operator, "value": val}, None
 
@@ -277,6 +281,38 @@ class ParserSQL:
             if not (isinstance(payload, list) and len(payload) == 2):
                 raise SQLParserError("Esperaba [lon, lat] para k-NN")
             return {"type": "spatial_knn", "column": column, "point": payload, "k": k}
+        
+    def _parse_value(self):
+        tok = self._consume_token()
+
+        if tok.startswith('"') and tok.endswith('"'):
+            return tok[1:-1]
+        if tok.startswith("'") and tok.endswith("'"):
+            return tok[1:-1]
+
+        try:
+            return float(tok) if '.' in tok else int(tok)
+        except ValueError:
+            pass
+
+        if tok == "[":
+            vals = []
+            while self._current_token() != "]":
+                vals.append(self._parse_value())
+                if self._current_token() == ",": self._consume_token()
+            self._expect_token("]")
+            return vals
+
+        return tok  # identificador o string sin comillas
+
+    def validate_statement(self, statement) -> bool:
+        if isinstance(statement, CreateTableStatement):
+            if statement.from_file and not statement.using_index:
+                raise SQLParserError("CREATE TABLE FROM FILE requiere USING INDEX")
+            return True
+        elif isinstance(statement, (SelectStatement, InsertStatement, DeleteStatement)):
+            return True
+        return False
     
 def parse_sql(query: str):
     parser = ParserSQL()
@@ -284,14 +320,35 @@ def parse_sql(query: str):
 
 if __name__ == "__main__":
     tests = [
-        # 1) Path con comillas dobles + ISAM
-        'CREATE TABLE Restaurantes FROM FILE "C:\\data\\restaurantes.csv" USING INDEX ISAM("id")',
+        # SELECT *
+        "select * from Empleados",
 
-        # 2) Path con comillas simples + SEQ
-        "create table Empleados from file 'C:/datasets/empleados.csv' using index seq('Employee_ID')",
+        # SELECT columnas específicas
+        "SELECT nombre, salario FROM Empleados",
 
-        # 3) Sin USING INDEX (debería dejar using_index=None)
-        'CREATE TABLE Ventas FROM FILE "ventas_2024.csv"'
+        # SELECT con igualdad (numérica)
+        "select * from Empleados where id = 42",
+
+        # SELECT con igualdad (string; ¡con comillas!)
+        "select * from Empleados where nombre = 'Ana'",
+
+        # SELECT con BETWEEN numérico
+        "select * from Empleados where salario between 50000 and 100000",
+
+        # SELECT con BETWEEN string (rango lexicográfico)
+        "select * from Empleados where nombre between 'A' and 'M'",
+
+        # SELECT espacial: rango por punto + radio (2 o 3 valores)
+        "select * from Restaurantes where ubicacion in (point, [12.5, -77.0, 3])",
+
+        # SELECT espacial: k-NN (k, [lon, lat])
+        "select * from Restaurantes where ubicacion in (5, [12.5, -77.0])",
+
+        # SELECT con otro operador (el parser lo captura como 'operator')
+        "select * from Empleados where edad >= 30",
+
+        # Caso inválido (para ver el error): falta valor
+        "select * from Empleados where id ="
     ]
 
     for i, q in enumerate(tests, 1):
