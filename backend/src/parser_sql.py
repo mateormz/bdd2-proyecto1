@@ -281,6 +281,16 @@ class ParserSQL:
             if not (isinstance(payload, list) and len(payload) == 2):
                 raise SQLParserError("Esperaba [lon, lat] para k-NN")
             return {"type": "spatial_knn", "column": column, "point": payload, "k": k}
+        
+    def _parse_delete(self):
+        self._consume_token()      # DELETE
+        self._expect_token("FROM")
+        table_name = self._consume_token()
+        self._expect_token("WHERE")
+        where_clause, _ = self._parse_where_clause()
+        if not where_clause:
+            raise SQLParserError("DELETE requiere WHERE válido")
+        return DeleteStatement(table_name, where_clause)
 
     def _parse_insert(self):
         self._consume_token()      # INSERT
@@ -337,19 +347,15 @@ def parse_sql(query: str):
 
 if __name__ == "__main__":
     tests = [
-        # 1) Insert simple numérico
-        "INSERT INTO Empleados VALUES (1, 30, 52000)",
+        # 1) DELETE por igualdad numérica
+        "DELETE FROM Empleados WHERE id = 2",
 
-        # 2) Insert con strings
-        "insert into Empleados values (2, 'Ana', \"Marketing\")",
+        # 2) DELETE por igualdad de string (con comillas)
+        "delete from Empleados where nombre = 'Ana'",
 
-        # 3) Insert con array
-        "insert into Restaurantes values (10, 'Pizza Hut', [12.5, -77.0])",
-
-        # 4) Caso inválido (paréntesis sin cerrar)
-        "INSERT INTO t1 VALUES (1, 2, 3"
+        # 3) DELETE con BETWEEN (rango)
+        "DELETE FROM Empleados WHERE edad BETWEEN 30 AND 40",
     ]
-
     for i, q in enumerate(tests, 1):
         try:
             print(f"\n== Test {i} ==")
