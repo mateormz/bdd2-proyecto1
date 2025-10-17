@@ -28,3 +28,23 @@ class Catalog:
         t = self.tables.get(table, {})
         if "indexes" in t and column in t["indexes"]:
             del t["indexes"][column]
+
+if __name__ == "__main__":
+    c = Catalog()
+
+    # Crear tabla
+    c.register_table(
+        "empleados",
+        {"key": "id", "columns": ["id", "nombre", "edad"]},
+        "out/empleados.dat"
+    )
+    print("Tablas registradas:", c.list_tables())
+
+    # Agregar índice
+    c.register_index("empleados", "edad", IndexType.BTREE, "out/empleados_edad_BTree.dat")
+    print("Tabla empleados:", c.get_table("empleados"))
+    print("Índice edad:", c.get_index("empleados", "edad"))
+
+    # Eliminar índice
+    c.drop_index("empleados", "edad")
+    print("Después de borrar índice:", c.get_table("empleados"))
