@@ -343,24 +343,40 @@ class ParserSQL:
     
 def parse_sql(query: str):
     parser = ParserSQL()
-    return parser.parse(query)
+    stmt = parser.parse(query)
+    parser.validate_statement(stmt)
+    return stmt
 
 if __name__ == "__main__":
     tests = [
-        # 1) DELETE por igualdad numérica
-        "DELETE FROM Empleados WHERE id = 2",
-
-        # 2) DELETE por igualdad de string (con comillas)
-        "delete from Empleados where nombre = 'Ana'",
-
-        # 3) DELETE con BETWEEN (rango)
-        "DELETE FROM Empleados WHERE edad BETWEEN 30 AND 40",
+        # CREATE con esquema
+        """CREATE TABLE Restaurantes (
+            id INT KEY INDEX SEQ,
+            nombre VARCHAR[20] INDEX BTree,
+            fechaRegistro DATE,
+            ubicacion ARRAY[FLOAT] INDEX RTree
+        )""",
+        # CREATE desde archivo
+        """create table Restaurantes from file "C:\\restaurantes.csv" using index isam("id")""",
+        # SELECT *
+        "select * from Restaurantes",
+        # SELECT =
+        "select * from Restaurantes where id = 123",
+        # SELECT between
+        "select * from Restaurantes where nombre between 'A' and 'Z'",
+        # INSERT
+        "insert into Restaurantes values (1, 'Pizza Hut', '2023-01-01', [12.5, -77.0])",
+        # DELETE
+        "delete from Restaurantes where id = 123",
+        # SELECT espacial
+        "select * from Restaurantes where ubicacion in (point, [12.5, -77.0, 3.5])",
+        # k-NN espacial
+        "select * from Restaurantes where ubicacion in (5, [12.5, -77.0])",
     ]
     for i, q in enumerate(tests, 1):
         try:
             print(f"\n== Test {i} ==")
             print(q)
-            result = parse_sql(q)
-            print("Resultado:", result)
+            print(parse_sql(q))
         except Exception as e:
             print("ERROR:", e)
