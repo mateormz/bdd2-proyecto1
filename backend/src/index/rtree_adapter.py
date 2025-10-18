@@ -28,8 +28,13 @@ class RTreeAdapter:
     def rangeSearch(self, point, radio):
         x, y = point
         results = []
-        for rid in self.idx.intersection((x - radio, y - radio, x + radio, y + radio)):
-            results.append(rid)
+        candidates = self.idx.intersection((x - radio, y - radio, x + radio, y + radio), objects=True)
+        for c in candidates:
+            px, py = (c.bbox[0], c.bbox[1])
+            dist = math.sqrt((px - x) ** 2 + (py - y) ** 2)
+            if dist <= radio:
+                results.append({"id": c.id, "x": px, "y": py, "dist": round(dist, 4)})
+        results.sort(key=lambda r: r["dist"])
         return results
 
     def kNN(self, point, k):
@@ -37,6 +42,7 @@ class RTreeAdapter:
         return list(self.idx.nearest((x, y, x, y), num_results=k))
 
 # PRUEBA
+""""
 if __name__ == "__main__":
     rt = RTreeAdapter()
     rt.add((1, 1), 1)
@@ -48,3 +54,4 @@ if __name__ == "__main__":
 
     rt.remove((1, 1), 1)
     print("Después de eliminar:", rt.kNN((2, 2), 5))
+"""
