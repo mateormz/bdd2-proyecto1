@@ -42,7 +42,7 @@ class RTreeAdapter:
         return list(self.idx.nearest((x, y, x, y), num_results=k))
 
 # PRUEBA
-
+""""
 if __name__ == "__main__":
     rt = RTreeAdapter()
     rt.add((1, 1), 1)
@@ -54,3 +54,4 @@ if __name__ == "__main__":
 
     rt.remove((1, 1), 1)
     print("Después de eliminar:", rt.kNN((2, 2), 5))
+"""
