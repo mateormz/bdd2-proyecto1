@@ -511,7 +511,7 @@ if __name__ == "__main__":
     for r in bpt.range_search(5, 12):
         print(r["id"], r["nombre"])
 
-    #print("remove(8) ->", bpt.remove(8))
+    print("remove(8) ->", bpt.remove(8))
     print("range [1,12] tras remove:")
     for r in bpt.range_search(1, 12):
         print(r["id"], r["nombre"])
