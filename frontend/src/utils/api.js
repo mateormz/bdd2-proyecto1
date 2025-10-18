@@ -10,3 +10,23 @@ export async function getHealth() {
 		throw error;
 	}
 }
+
+export async function getTables() {
+	try {
+		const response = await axios.get(`${API_BASE_URL}/tables`);
+		return response.data;
+	} catch (error) {
+		throw error;
+	}
+}
+
+export async function executeSQL(query) {
+	try {
+		const response = await axios.post(`${API_BASE_URL}/execute`, {
+			query: query
+		});
+		return response.data;
+	} catch (error) {
+		throw error;
+	}
+}
