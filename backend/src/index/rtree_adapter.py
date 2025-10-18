@@ -40,17 +40,3 @@ class RTreeAdapter:
     def kNN(self, point, k):
         x, y = point
         return list(self.idx.nearest((x, y, x, y), num_results=k))
-
-# PRUEBA
-
-if __name__ == "__main__":
-    rt = RTreeAdapter()
-    rt.add((1, 1), 1)
-    rt.add((2, 2), 2)
-    rt.add((10, 10), 3)
-
-    print("Rango (2,2,r=2):", rt.rangeSearch((2, 2), 2))
-    print("KNN (2,2,k=2):", rt.kNN((2, 2), 2))
-
-    rt.remove((1, 1), 1)
-    print("Después de eliminar:", rt.kNN((2, 2), 5))
