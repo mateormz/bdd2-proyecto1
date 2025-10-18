@@ -292,6 +292,64 @@ class ISAMFile:
 
         return None
 
+    def rangeSearch(self, begin_key: int, end_key: int):
+        """
+        Retorna todos los registros entre begin_key y end_key (inclusivo)
+        """
+        if not os.path.exists(self.filename):
+            return []
+        
+        if begin_key > end_key:
+            return []
+        
+        results = []
+        
+        start_page_idx = self._locate_data_page(begin_key)
+        if start_page_idx < 0:
+            return []
+        
+        with open(self.filename, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            total_size = f.tell()
+        total_pages = total_size // DataPage.SIZE_OF_PAGE
+        
+        visited = set()
+        pages_to_visit = [start_page_idx]
+        
+        while pages_to_visit:
+            page_idx = pages_to_visit.pop(0)
+            
+            if page_idx in visited or page_idx < 0 or page_idx >= total_pages:
+                continue
+            
+            visited.add(page_idx)
+            
+            current_idx = page_idx
+            found_in_chain = False
+            
+            while current_idx != -1 and current_idx < total_pages:
+                page = self._read_data_page(current_idx)
+                
+                for rec in page.records:
+                    if rec.deleted == 0 and begin_key <= rec.sale_id <= end_key:
+                        results.append(rec)
+                        found_in_chain = True
+
+                    elif rec.sale_id > end_key and current_idx == page_idx and not found_in_chain:
+                        pass
+                
+                current_idx = page.next_overflow
+            
+            last_page = self._read_data_page(page_idx)
+            if last_page.records:
+                max_id_in_page = max(rec.sale_id for rec in last_page.records if rec.deleted == 0) if any(rec.deleted == 0 for rec in last_page.records) else 0
+                
+                if max_id_in_page < end_key and page_idx + 1 < total_pages:
+                    pages_to_visit.append(page_idx + 1)
+        
+        results.sort(key=lambda r: r.sale_id)
+        return results
+
     def insert(self, record: Record):
         """Inserta un registro. Primero llena nodos, luego aplica chaining"""
         page_idx = self._locate_data_page(record.sale_id)
@@ -427,8 +485,6 @@ if __name__ == "__main__":
     print("\n=== ESTRUCTURA DE ÍNDICES ===")
     isam.scanIndex()
 
-    
-
     # Búsqueda
     print("\n=== BÚSQUEDA ===")
     qid = 403
@@ -438,13 +494,10 @@ if __name__ == "__main__":
     else:
         print(f"NOT FOUND: {qid}")
 
-    
-
     # Inserción (debe llenar nodos primero)
     print("\n=== INSERCIÓN 1 (llenar página) ===")
-    isam.insert(Record(10001, "NEW ITEM A", 10, 99.99, "2025-01-01"))
+    isam.insert(Record(405, "NEW ITEM A", 10, 99.99, "2025-01-01"))
     isam.scanAll()
-    isam.scanIndex()
 
     # Inserción que fuerza overflow (chaining)
     print("\n=== INSERCIÓN 2 (debe crear overflow) ===")
@@ -466,29 +519,42 @@ if __name__ == "__main__":
     print("\n=== ÍNDICE (debe permanecer estático) ===")
     isam.scanIndex()
 
-    # Inserción (debe llenar nodos primero)
-    print("\n=== INSERCIÓN 1 (llenar página) ===")
-    isam.insert(Record(10005, "NEW ITEM A", 10, 99.99, "2025-01-01"))
-    isam.scanAll()
-    isam.scanIndex()
+    print("\n--- Rango 100-400 (múltiples páginas) ---")
+    results = isam.rangeSearch(100, 400)
+    print(f"Encontrados: {len(results)} registros")
+    for r in results:
+        print(f"  {r.sale_id:4d} | {r.product_name:30s} | {r.quantity:3d} | ${r.unit_price:7.2f}")
 
-    # Inserción (debe llenar nodos primero)
-    print("\n=== INSERCIÓN 1 (llenar página) ===")
-    isam.insert(Record(10002, "NEW ITEM A", 10, 99.99, "2025-01-01"))
+    # Más inserciones
+    print("\n=== INSERCIÓN 3 ===")
+    isam.insert(Record(408, "NEW ITEM C", 15, 75.50, "2025-01-03"))
     isam.scanAll()
-    isam.scanIndex()
 
-    # Inserción (debe llenar nodos primero)
-    print("\n=== INSERCIÓN 1 (llenar página) ===")
-    isam.insert(Record(10004, "NEW ITEM A", 10, 99.99, "2025-01-01"))
+    # Más inserciones
+    print("\n=== INSERCIÓN 3 ===")
+    isam.insert(Record(250, "NEW ITEM C", 15, 75.50, "2025-01-03"))
     isam.scanAll()
-    isam.scanIndex()
 
-    # Búsqueda
+    # Más inserciones
+    print("\n=== INSERCIÓN 3 ===")
+    isam.insert(Record(150, "NEW ITEM C", 15, 75.50, "2025-01-03"))
+    isam.scanAll()
+
+    # Más inserciones
+    print("\n=== INSERCIÓN 3 ===")
+    isam.insert(Record(401, "NEW ITEM C", 15, 75.50, "2025-01-03"))
+    isam.scanAll()
+
     print("\n=== BÚSQUEDA ===")
-    qid = 10004
+    qid = 250
     rec = isam.search(qid)
     if rec:
         print(f"FOUND: {rec.sale_id} | {rec.product_name} | {rec.quantity} | {rec.unit_price:.2f}")
     else:
         print(f"NOT FOUND: {qid}")
+
+    print("\n--- Rango 100-400 (múltiples páginas) ---")
+    results = isam.rangeSearch(100, 400)
+    print(f"Encontrados: {len(results)} registros")
+    for r in results:
+        print(f"  {r.sale_id:4d} | {r.product_name:30s} | {r.quantity:3d} | ${r.unit_price:7.2f}")
