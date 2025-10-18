@@ -293,6 +293,193 @@ class BPlusTreeFile:
         self._save_node(right_pid, right)
         return (sep_key, right_pid)
 
+    def remove(self, key: Any, only_first: bool = False) -> int:
+        removed, root_shrunk = self._remove_recursive(self.dm.root_pid, key, only_first)
+        root, is_leaf = self._load_node(self.dm.root_pid)
+        if not is_leaf and len(root.children) == 1:
+            self.dm.set_root(root.children[0])
+        return removed
+
+    def _remove_recursive(self, pid: int, key: Any, only_first: bool) -> Tuple[int, bool]:
+        node, is_leaf = self._load_node(pid)
+        if is_leaf:
+            count = 0
+            i = bisect.bisect_left(node.keys, key)
+            while i < len(node.keys) and node.keys[i] == key:
+                node.keys.pop(i)
+                node.records.pop(i)
+                count += 1
+                if only_first: break
+            self._save_node(pid, node)
+            return count, self._underflow_leaf_fix(pid, node)
+        else:
+            idx = bisect.bisect_left(node.keys, key)
+            child_pid = node.children[idx]
+            removed, _ = self._remove_recursive(child_pid, key, only_first)
+            if removed == 0:
+                return 0, False
+            child, child_is_leaf = self._load_node(child_pid)
+            self._save_node(pid, node)
+            self._underflow_internal_fix(pid)
+            return removed, False
+
+    def _underflow_leaf_fix(self, pid: int, node: LeafNode) -> bool:
+        if pid == self.dm.root_pid:
+            self._save_node(pid, node)
+            return False
+        if len(node.keys) >= self._min_keys(True):
+            self._save_node(pid, node)
+            return False
+        parent_pid, parent, idx = self._find_parent_and_index(pid)
+        if idx > 0:
+            left_pid = parent.children[idx-1]
+            left, _ = self._load_node(left_pid)
+            if len(left.keys) > self._min_keys(True):
+                node.keys.insert(0, left.keys.pop())
+                node.records.insert(0, left.records.pop())
+                parent.keys[idx-1] = node.keys[0]
+                self._save_node(left_pid, left)
+                self._save_node(pid, node)
+                self._save_node(parent_pid, parent)
+                return False
+        if idx < len(parent.children)-1:
+            right_pid = parent.children[idx+1]
+            right, _ = self._load_node(right_pid)
+            if len(right.keys) > self._min_keys(True):
+                node.keys.append(right.keys.pop(0))
+                node.records.append(right.records.pop(0))
+                parent.keys[idx] = right.keys[0] if right.keys else parent.keys[idx]
+                self._save_node(right_pid, right)
+                self._save_node(pid, node)
+                self._save_node(parent_pid, parent)
+                return False
+        if idx > 0:
+            left_pid = parent.children[idx-1]
+            left, _ = self._load_node(left_pid)
+            left.keys.extend(node.keys)
+            left.records.extend(node.records)
+            left.next_leaf = node.next_leaf
+            self._save_node(left_pid, left)
+            parent.keys.pop(idx-1)
+            parent.children.pop(idx)
+            self._save_node(parent_pid, parent)
+            self.dm.free_page(pid)
+        else:
+            right_pid = parent.children[idx+1]
+            right, _ = self._load_node(right_pid)
+            node.keys.extend(right.keys)
+            node.records.extend(right.records)
+            node.next_leaf = right.next_leaf
+            self._save_node(pid, node)
+            parent.keys.pop(idx)
+            parent.children.pop(idx+1)
+            self._save_node(parent_pid, parent)
+            self.dm.free_page(right_pid)
+        self._underflow_internal_fix(parent_pid)
+        return True
+
+    def _underflow_internal_fix(self, pid: int) -> bool:
+        if pid == self.dm.root_pid:
+            node, leaf = self._load_node(pid)
+            self._save_node(pid, node)
+            return False
+        node, _ = self._load_node(pid)
+        if len(node.keys) >= self._min_keys(False):
+            self._save_node(pid, node)
+            return False
+        parent_pid, parent, idx = self._find_parent_and_index(pid)
+        if idx > 0:
+            left_pid = parent.children[idx-1]
+            left, _ = self._load_node(left_pid)
+            if len(left.keys) > self._min_keys(False):
+                sep = parent.keys[idx-1]
+                node.children.insert(0, left.children.pop())
+                node.keys.insert(0, sep)
+                parent.keys[idx-1] = left.keys.pop()
+                self._save_node(left_pid, left)
+                self._save_node(pid, node)
+                self._save_node(parent_pid, parent)
+                return False
+        if idx < len(parent.children)-1:
+            right_pid = parent.children[idx+1]
+            right, _ = self._load_node(right_pid)
+            if len(right.keys) > self._min_keys(False):
+                sep = parent.keys[idx]
+                node.children.append(right.children.pop(0))
+                node.keys.append(sep)
+                parent.keys[idx] = right.keys.pop(0)
+                self._save_node(right_pid, right)
+                self._save_node(pid, node)
+                self._save_node(parent_pid, parent)
+                return False
+        if idx > 0:
+            left_pid = parent.children[idx-1]
+            left, _ = self._load_node(left_pid)
+            left.keys.append(parent.keys.pop(idx-1))
+            left.keys.extend(node.keys)
+            left.children.extend(node.children)
+            self._save_node(left_pid, left)
+            parent.children.pop(idx)
+            self._save_node(parent_pid, parent)
+            self.dm.free_page(pid)
+        else:
+            right_pid = parent.children[idx+1]
+            right, _ = self._load_node(right_pid)
+            node.keys.append(parent.keys.pop(idx))
+            node.keys.extend(right.keys)
+            node.children.extend(right.children)
+            self._save_node(pid, node)
+            parent.children.pop(idx+1)
+            self._save_node(parent_pid, parent)
+            self.dm.free_page(right_pid)
+        self._underflow_internal_fix(parent_pid)
+        return True
+
+    def _find_parent_and_index(self, child_pid: int) -> Tuple[int, InternalNode, int]:
+        if child_pid == self.dm.root_pid:
+            raise ValueError("La raíz no tiene padre")
+        pid = self.dm.root_pid
+        parent_pid = 0
+        parent = None
+        while True:
+            node, is_leaf = self._load_node(pid)
+            if is_leaf:
+                raise RuntimeError("No se encontró padre (árbol corrupto)")
+            for i, cpid in enumerate(node.children):
+                if cpid == child_pid:
+                    return pid, node, i
+            for cpid in node.children:
+                sub, is_leaf = self._load_node(cpid)
+                if not is_leaf:
+                    found = self._contains_desc(cpid, child_pid)
+                    if found:
+                        parent_pid, parent = pid, node
+                        pid = cpid
+                        break
+                else:
+                    if cpid == child_pid:
+                        return pid, node, node.children.index(cpid)
+            else:
+                for i, cpid in enumerate(node.children):
+                    if cpid == child_pid:
+                        return pid, node, i
+                raise RuntimeError("Padre no encontrado (descenso falló)")
+
+    def _contains_desc(self, pid: int, target: int) -> bool:
+        node, is_leaf = self._load_node(pid)
+        if is_leaf:
+            return False
+        if target in node.children:
+            return True
+        for c in node.children:
+            sub, leaf = self._load_node(c)
+            if not leaf and self._contains_desc(c, target):
+                return True
+        return False
+
+    def close(self):
+        self.dm.close()
+
 
 
 
