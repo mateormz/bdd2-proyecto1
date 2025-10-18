@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Callable
 import os, csv, struct, bisect, pickle
-
 
 PAGE_SIZE   = 4096
 MAGIC       = b"BPTCFS1\0"
@@ -12,14 +11,12 @@ VERSION     = 1
 ORDER_HINT  = 64
 NUM_FMT     = "<"
 
-
 L_NAME   = 32
 L_GENDER = 8
 L_DEPT   = 16
 L_TITLE  = 16
 L_EDU    = 12
 L_LOC    = 16
-
 
 RECORD_FORMAT = (
     NUM_FMT +
@@ -54,9 +51,6 @@ class Record:
     experience_years: int
     education_level: str
     location: str
-
-    def key(self) -> int:
-        return int(self.employee_id)
 
     def pack(self) -> bytes:
         return struct.pack(
@@ -101,7 +95,6 @@ class Record:
 class IOStats:
     def __init__(self): self.reads=0; self.writes=0
     def reset(self): self.reads=0; self.writes=0
-
 IO = IOStats()
 
 class Disk:
@@ -171,7 +164,6 @@ class Disk:
     def close(self):
         self.f.flush(); self.f.close()
 
-
 LEAF_HDR_FMT  = "<ciii"
 LEAF_HDR_SIZE = struct.calcsize(LEAF_HDR_FMT)
 
@@ -182,9 +174,6 @@ class LeafPage:
         self.recs: List[Record] = [] if recs is None else recs
         self.prev_leaf = prev_leaf
         self.next_leaf = next_leaf
-
-    def keys(self) -> List[int]:
-        return [r.employee_id for r in self.recs]
 
     def pack(self) -> bytes:
         if len(self.recs) > BLOCK_FACTOR:
@@ -209,7 +198,7 @@ class LeafPage:
 @dataclass
 class InternalNode:
     is_leaf: bool
-    keys: List[int]
+    keys: List[Any]
     children: List[int]
 
 def write_internal(dsk: Disk, pid: int, node: InternalNode):
@@ -225,15 +214,14 @@ def is_leaf_page(raw: bytes) -> bool:
     return len(raw) >= 1 and raw[0:1] == b"L"
 
 class BPlusClustered:
-    def __init__(self, filename: str, order_hint: int = ORDER_HINT):
+    def __init__(self, filename: str, order_hint: int, key_fn: Callable[[Record], Any]):
         self.dsk = Disk(filename)
         self.order = order_hint
+        self.key_fn = key_fn
         if self.dsk.root_pid == 0:
-            # crear primera hoja vacía
             leaf_pid = self.dsk.alloc()
             self.dsk.write_raw(leaf_pid, LeafPage().pack())
             self.dsk.set_root(leaf_pid)
-
 
     def _load(self, pid: int):
         raw = self.dsk.read_raw(pid)
@@ -244,21 +232,22 @@ class BPlusClustered:
         if is_leaf: self.dsk.write_raw(pid, node.pack())
         else:       write_internal(self.dsk, pid, node)
 
-    def search(self, key: int) -> List[Record]:
+    def search(self, key: Any) -> List[Record]:
         pid = self.dsk.root_pid
         node, is_leaf = self._load(pid)
         while not is_leaf:
             idx = bisect.bisect_left(node.keys, key)
             pid = node.children[idx]
             node, is_leaf = self._load(pid)
-        keys = [r.employee_id for r in node.recs]
+
+        keys = [self.key_fn(r) for r in node.recs]
         i = bisect.bisect_left(keys, key)
         out: List[Record] = []
-        while i < len(node.recs) and node.recs[i].employee_id == key:
+        while i < len(node.recs) and self.key_fn(node.recs[i]) == key:
             out.append(node.recs[i]); i += 1
         return out
 
-    def range_search(self, lo: int, hi: int) -> Iterable[Record]:
+    def range_search(self, lo: Any, hi: Any) -> Iterable[Record]:
         pid = self.dsk.root_pid
         node, is_leaf = self._load(pid)
         while not is_leaf:
@@ -266,16 +255,18 @@ class BPlusClustered:
             pid = node.children[idx]
             node, is_leaf = self._load(pid)
         while True:
-            keys = [r.employee_id for r in node.recs]
+            keys = [self.key_fn(r) for r in node.recs]
             i = bisect.bisect_left(keys, lo)
-            while i < len(node.recs) and node.recs[i].employee_id <= hi:
+            while i < len(node.recs) and self.key_fn(node.recs[i]) <= hi:
                 yield node.recs[i]; i += 1
             if node.next_leaf == 0: break
             nxt, leaf = self._load(node.next_leaf)
-            if not leaf or (len(nxt.recs) and nxt.recs[0].employee_id > hi): break
+            if not leaf or (len(nxt.recs) and self.key_fn(nxt.recs[0]) > hi): break
             node = nxt
 
-    def insert(self, key: int, rec: Record):
+
+    def insert(self, rec: Record):
+        key = self.key_fn(rec)
         split = self._ins_rec(self.dsk.root_pid, key, rec)
         if split is not None:
             sep_key, right_pid = split
@@ -285,14 +276,15 @@ class BPlusClustered:
             self._save(new_pid, new_root, False)
             self.dsk.set_root(new_pid)
 
-    def _ins_rec(self, pid: int, key: int, rec: Record):
+    def _ins_rec(self, pid: int, key: Any, rec: Record):
         node, is_leaf = self._load(pid)
         if is_leaf:
-            pos = bisect.bisect_right([r.employee_id for r in node.recs], key)
+            pos = bisect.bisect_right([self.key_fn(r) for r in node.recs], key)
             node.recs.insert(pos, rec)
             if len(node.recs) <= BLOCK_FACTOR:
                 self._save(pid, node, True)
                 return None
+
 
             mid = len(node.recs) // 2
             right_recs = node.recs[mid:]
@@ -302,7 +294,7 @@ class BPlusClustered:
             node.next_leaf = right_pid
             self._save(pid, node, True)
             self._save(right_pid, right, True)
-            sep_key = right.recs[0].employee_id
+            sep_key = self.key_fn(right.recs[0])
             return (sep_key, right_pid)
         else:
             idx = bisect.bisect_left(node.keys, key)
@@ -312,10 +304,9 @@ class BPlusClustered:
             sep, right_pid = split
             node.keys.insert(idx, sep)
             node.children.insert(idx+1, right_pid)
-            if len(node.keys) <= self.order:
+            if len(node.keys) <= ORDER_HINT:
                 self._save(pid, node, False)
                 return None
-
             mid = len(node.keys) // 2
             sep_up = node.keys[mid]
             right = InternalNode(False, node.keys[mid+1:], node.children[mid+1:])
@@ -326,21 +317,20 @@ class BPlusClustered:
             self._save(right_pid2, right, False)
             return (sep_up, right_pid2)
 
-
-    def remove(self, key: int, only_first: bool = False) -> int:
+    def remove(self, key: Any, only_first: bool = False) -> int:
         removed = self._rem_rec(self.dsk.root_pid, key, only_first)
         root, leaf = self._load(self.dsk.root_pid)
         if (not leaf) and len(root.children) == 1:
             self.dsk.set_root(root.children[0])
         return removed
 
-    def _rem_rec(self, pid: int, key: int, only_first: bool) -> int:
+    def _rem_rec(self, pid: int, key: Any, only_first: bool) -> int:
         node, is_leaf = self._load(pid)
         if is_leaf:
-            keys = [r.employee_id for r in node.recs]
+            keys = [self.key_fn(r) for r in node.recs]
             i = bisect.bisect_left(keys, key)
             cnt = 0
-            while i < len(node.recs) and node.recs[i].employee_id == key:
+            while i < len(node.recs) and self.key_fn(node.recs[i]) == key:
                 node.recs.pop(i); cnt += 1
                 if only_first: break
             self._save(pid, node, True)
@@ -355,6 +345,21 @@ class BPlusClustered:
     def close(self):
         self.dsk.close()
 
+CSV_TO_ATTR = {
+    "Employee_ID": "employee_id",
+    "Name": "name",
+    "Age": "age",
+    "Gender": "gender",
+    "Department": "department",
+    "Job_Title": "job_title",
+    "Salary": "salary",
+    "Experience_Years": "experience_years",
+    "Education_Level": "education_level",
+    "Location": "location",
+}
+
+INT_FIELDS = {"Employee_ID", "Age", "Salary", "Experience_Years"}
+STR_FIELDS = set(CSV_TO_ATTR.keys()) - INT_FIELDS
 
 def row_to_record(row: Dict[str, str]) -> Record:
     return Record(
@@ -370,12 +375,31 @@ def row_to_record(row: Dict[str, str]) -> Record:
         location         = row["Location"],
     )
 
+def make_key_fn(key_field: str) -> Callable[[Record], Any]:
+    attr = CSV_TO_ATTR[key_field]
+    if key_field in INT_FIELDS:
+        return lambda r: int(getattr(r, attr))
+    else:
+        return lambda r: str(getattr(r, attr))
+
 
 if __name__ == "__main__":
-    csv_path = "../../data/Employers_data.csv"
-    if os.path.exists("employees.bpt"): os.remove("employees.bpt")
-    bpt = BPlusClustered("employees.bpt", order_hint=64)
 
+    csv_path = "../../data/Employers_data.csv"
+
+
+    print("Campos disponibles:", ", ".join(CSV_TO_ATTR.keys()))
+    key_field = input("¿Qué campo del CSV será la clave del B+Tree? (exacto): ").strip()
+    if key_field not in CSV_TO_ATTR:
+        raise ValueError(f"Campo no válido: {key_field}")
+
+
+    idx_filename = f"employees_{CSV_TO_ATTR[key_field]}.bpt"
+    if os.path.exists(idx_filename):
+        os.remove(idx_filename)
+
+    key_fn = make_key_fn(key_field)
+    bpt = BPlusClustered(idx_filename, ORDER_HINT, key_fn)
 
     rows: List[Dict[str, Any]] = []
     with open(csv_path, newline="", encoding="utf-8") as f:
@@ -384,21 +408,27 @@ if __name__ == "__main__":
             rows.append(r)
 
     recs = [row_to_record(r) for r in rows]
-    for r in recs:
-        bpt.insert(r.employee_id, r)
+
+    for rec in recs:
+        bpt.insert(rec)
+
 
     if recs:
-        k = recs[len(recs)//2].employee_id
-        print("search(", k, ") ->", len(bpt.search(k)))
 
-        lo = recs[len(recs)//3].employee_id
-        hi = recs[len(recs)//3 * 2].employee_id
-        lo, hi = min(lo, hi), max(lo, hi)
-        cnt = sum(1 for _ in bpt.range_search(lo, hi))
-        print(f"range_search({lo}..{hi}) ->", cnt)
+        mid_rec = recs[len(recs)//2]
+        k = key_fn(mid_rec)
+        print(f"search({k!r}) ->", len(bpt.search(k)))
+
+        lo_rec = recs[len(recs)//3]
+        hi_rec = recs[len(recs)//3*2]
+        lo_key, hi_key = key_fn(lo_rec), key_fn(hi_rec)
+        if lo_key > hi_key:
+            lo_key, hi_key = hi_key, lo_key
+        cnt = sum(1 for _ in bpt.range_search(lo_key, hi_key))
+        print(f"range_search({lo_key!r}..{hi_key!r}) ->", cnt)
 
         rem = bpt.remove(k, only_first=True)
-        print("remove(", k, ") ->", rem)
+        print(f"remove({k!r}) ->", rem)
 
     print("Leaf BLOCK_FACTOR:", BLOCK_FACTOR)
     print("I/O reads:", IO.reads, "writes:", IO.writes)
