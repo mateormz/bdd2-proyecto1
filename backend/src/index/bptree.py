@@ -1,520 +1,405 @@
-# B+ Tree File Clustered
+# B+ Tree Clustered File - Index
 
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Any, List, Optional, Tuple, Iterable, Dict
-import os, io, struct, pickle, bisect
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+import os, csv, struct, bisect, pickle
 
 
-PAGE_SIZE = 4096
-MAGIC     = b"BPTREE1\0"
-VERSION   = 1
-ORDER_HINT = 64
+PAGE_SIZE   = 4096
+MAGIC       = b"BPTCFS1\0"
+VERSION     = 1
+ORDER_HINT  = 64
+NUM_FMT     = "<"
+
+
+L_NAME   = 32
+L_GENDER = 8
+L_DEPT   = 16
+L_TITLE  = 16
+L_EDU    = 12
+L_LOC    = 16
+
+
+RECORD_FORMAT = (
+    NUM_FMT +
+    "i" +
+    f"{L_NAME}s" +
+    "h" +
+    f"{L_GENDER}s" +
+    f"{L_DEPT}s" +
+    f"{L_TITLE}s" +
+    "i" +
+    "h" +
+    f"{L_EDU}s" +
+    f"{L_LOC}s"
+)
+RECORD_SIZE = struct.calcsize(RECORD_FORMAT)
+
+def _fixs(s: str, L: int) -> bytes:
+    return (s or "")[:L].ljust(L).encode("utf-8", errors="ignore")
+
+def _unfixs(b: bytes) -> str:
+    return b.decode("utf-8", errors="ignore").rstrip()
+
+@dataclass
+class Record:
+    employee_id: int
+    name: str
+    age: int
+    gender: str
+    department: str
+    job_title: str
+    salary: int
+    experience_years: int
+    education_level: str
+    location: str
+
+    def key(self) -> int:
+        return int(self.employee_id)
+
+    def pack(self) -> bytes:
+        return struct.pack(
+            RECORD_FORMAT,
+            int(self.employee_id),
+            _fixs(self.name, L_NAME),
+            int(self.age),
+            _fixs(self.gender, L_GENDER),
+            _fixs(self.department, L_DEPT),
+            _fixs(self.job_title, L_TITLE),
+            int(self.salary),
+            int(self.experience_years),
+            _fixs(self.education_level, L_EDU),
+            _fixs(self.location, L_LOC),
+        )
+
+    @staticmethod
+    def unpack(buf: bytes) -> "Record":
+        (employee_id,
+         b_name,
+         age,
+         b_gender,
+         b_dept,
+         b_title,
+         salary,
+         experience_years,
+         b_edu,
+         b_loc) = struct.unpack(RECORD_FORMAT, buf)
+        return Record(
+            employee_id=employee_id,
+            name=_unfixs(b_name),
+            age=age,
+            gender=_unfixs(b_gender),
+            department=_unfixs(b_dept),
+            job_title=_unfixs(b_title),
+            salary=salary,
+            experience_years=experience_years,
+            education_level=_unfixs(b_edu),
+            location=_unfixs(b_loc),
+        )
 
 class IOStats:
-    def __init__(self):
-        self.reads = 0
-        self.writes = 0
-
-    def reset(self):
-        self.reads = 0
-        self.writes = 0
+    def __init__(self): self.reads=0; self.writes=0
+    def reset(self): self.reads=0; self.writes=0
 
 IO = IOStats()
 
-
-
-
-
-
-
-
-class DiskManager:
-    HEADER_FMT = "<8sIQQQ"
+class Disk:
+    HEADER_FMT  = "<8sIQQQ"
     HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
     def __init__(self, filename: str):
-        self.filename = filename
         create = not os.path.exists(filename) or os.path.getsize(filename) == 0
         self.f = open(filename, "r+b" if not create else "w+b")
         if create:
-            self._init_file()
+            self.root_pid = 0
+            self.free_head = 0
+            self.num_pages = 1
+            self._write_header()
         else:
             self._read_header()
 
-    def _init_file(self):
-        self.root_pid = 0
-        self.free_head = 0
-        self.num_pages = 1
-        self._write_header()
-        self.f.flush()
-
     def _write_header(self):
         self.f.seek(0)
-        header = struct.pack(self.HEADER_FMT, MAGIC, VERSION, self.root_pid, self.free_head, self.num_pages)
-        pad = PAGE_SIZE - len(header)
-        self.f.write(header + (b"\x00" * pad))
+        hdr = struct.pack(self.HEADER_FMT, MAGIC, VERSION, self.root_pid, self.free_head, self.num_pages)
+        self.f.write(hdr + (b"\x00" * (PAGE_SIZE - len(hdr))))
         IO.writes += 1
 
     def _read_header(self):
         self.f.seek(0)
-        raw = self.f.read(PAGE_SIZE)
-        IO.reads += 1
+        raw = self.f.read(PAGE_SIZE); IO.reads += 1
         magic, version, self.root_pid, self.free_head, self.num_pages = struct.unpack(self.HEADER_FMT, raw[:self.HEADER_SIZE])
         if magic != MAGIC:
-            raise ValueError("Archivo no es un B+Tree válido")
+            raise ValueError("Archivo no es B+ Clustered válido")
 
-    def alloc_page(self) -> int:
+    def alloc(self) -> int:
         if self.free_head != 0:
             pid = self.free_head
-            next_free = self._read_page(pid)["__free_next__"]
+            self.f.seek(pid * PAGE_SIZE)
+            raw = self.f.read(PAGE_SIZE); IO.reads += 1
+            next_free = struct.unpack("<Q", raw[:8])[0]
             self.free_head = next_free
             self._write_header()
             return pid
-        else:
-            pid = self.num_pages
-            self.write_page(pid, {"__empty__": True})
-            self.num_pages += 1
-            self._write_header()
-            return pid
+        pid = self.num_pages
+        self.write_raw(pid, b"\x00")
+        self.num_pages += 1
+        self._write_header()
+        return pid
 
-    def free_page(self, pid: int):
-        rec = {"__free__": True, "__free_next__": self.free_head}
-        self.write_page(pid, rec)
+    def free(self, pid: int):
+        buf = struct.pack("<Q", self.free_head)
+        self.write_raw(pid, buf)
         self.free_head = pid
         self._write_header()
 
-    def write_page(self, pid: int, obj: Any):
-        buf = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
-        if len(buf) > PAGE_SIZE:
-            raise ValueError(f"Objeto excede PAGE_SIZE ({len(buf)} > {PAGE_SIZE})")
+    def write_raw(self, pid: int, buf: bytes):
+        if len(buf) > PAGE_SIZE: raise ValueError("Página excede PAGE_SIZE")
         self.f.seek(pid * PAGE_SIZE)
-        pad = PAGE_SIZE - len(buf)
-        self.f.write(buf + (b"\x00" * pad))
+        self.f.write(buf + (b"\x00" * (PAGE_SIZE - len(buf))))
         IO.writes += 1
 
-    def _read_page(self, pid: int) -> Any:
+    def read_raw(self, pid: int) -> bytes:
         self.f.seek(pid * PAGE_SIZE)
-        raw = self.f.read(PAGE_SIZE)
-        IO.reads += 1
-        end = raw.rfind(b'.')
-        if end == -1:
-            return {}
-        data = raw[:end+1]
-        try:
-            return pickle.loads(data)
-        except Exception:
-            return {}
-
-    def read_page(self, pid: int) -> Any:
-        return self._read_page(pid)
+        raw = self.f.read(PAGE_SIZE); IO.reads += 1
+        return raw
 
     def set_root(self, pid: int):
         self.root_pid = pid
         self._write_header()
 
     def close(self):
-        self.f.flush()
-        self.f.close()
+        self.f.flush(); self.f.close()
 
 
+LEAF_HDR_FMT  = "<ciii"
+LEAF_HDR_SIZE = struct.calcsize(LEAF_HDR_FMT)
 
+BLOCK_FACTOR = max(1, (PAGE_SIZE - LEAF_HDR_SIZE) // RECORD_SIZE)
 
+class LeafPage:
+    def __init__(self, recs: Optional[List[Record]] = None, prev_leaf: int = 0, next_leaf: int = 0):
+        self.recs: List[Record] = [] if recs is None else recs
+        self.prev_leaf = prev_leaf
+        self.next_leaf = next_leaf
 
+    def keys(self) -> List[int]:
+        return [r.employee_id for r in self.recs]
 
+    def pack(self) -> bytes:
+        if len(self.recs) > BLOCK_FACTOR:
+            raise ValueError("Overflow en pack()")
+        out = [struct.pack(LEAF_HDR_FMT, b"L", len(self.recs), self.prev_leaf, self.next_leaf)]
+        out.extend(r.pack() for r in self.recs)
+        if len(self.recs) < BLOCK_FACTOR:
+            out.append(b"\x00" * ((BLOCK_FACTOR - len(self.recs)) * RECORD_SIZE))
+        return b"".join(out)
 
-
-
+    @staticmethod
+    def unpack(buf: bytes) -> "LeafPage":
+        tag, count, prev_leaf, next_leaf = struct.unpack(LEAF_HDR_FMT, buf[:LEAF_HDR_SIZE])
+        assert tag == b"L", "Página no es hoja"
+        recs: List[Record] = []
+        off = LEAF_HDR_SIZE
+        for _ in range(count):
+            recs.append(Record.unpack(buf[off:off+RECORD_SIZE]))
+            off += RECORD_SIZE
+        return LeafPage(recs, prev_leaf, next_leaf)
 
 @dataclass
 class InternalNode:
-    is_leaf: bool = False
-    keys: List[Any] = field(default_factory=list)
-    children: List[int] = field(default_factory=list)
+    is_leaf: bool
+    keys: List[int]
+    children: List[int]
 
-@dataclass
-class LeafNode:
-    is_leaf: bool = True
-    keys: List[Any] = field(default_factory=list)
-    records: List[Dict[str, Any]] = field(default_factory=list)
-    next_leaf: int = 0
+def write_internal(dsk: Disk, pid: int, node: InternalNode):
+    data = pickle.dumps({"is_leaf": False, "keys": node.keys, "children": node.children}, protocol=pickle.HIGHEST_PROTOCOL)
+    dsk.write_raw(pid, data)
 
+def read_internal(dsk: Disk, pid: int) -> InternalNode:
+    raw = dsk.read_raw(pid)
+    obj = pickle.loads(raw[:raw.rfind(b".")+1])
+    return InternalNode(False, obj["keys"], obj["children"])
 
+def is_leaf_page(raw: bytes) -> bool:
+    return len(raw) >= 1 and raw[0:1] == b"L"
 
-class BPlusTreeFile:
+class BPlusClustered:
     def __init__(self, filename: str, order_hint: int = ORDER_HINT):
-        self.dm = DiskManager(filename)
-        self.order_hint = order_hint
-
-        if self.dm.root_pid == 0:
-            root = LeafNode()
-            root_pid = self.dm.alloc_page()
-            self.dm.write_page(root_pid, root.__dict__)
-            self.dm.set_root(root_pid)
-
-
-    def _load_node(self, pid: int) -> Tuple[Any, bool]:
-        obj = self.dm.read_page(pid)
-        if obj.get("is_leaf", False):
-            node = LeafNode(**{k: obj[k] for k in ["is_leaf", "keys", "records", "next_leaf"]})
-            return node, True
-        else:
-            node = InternalNode(**{k: obj[k] for k in ["is_leaf", "keys", "children"]})
-            return node, False
-
-    def _save_node(self, pid: int, node: Any):
-        if isinstance(node, LeafNode):
-            self.dm.write_page(pid, {
-                "is_leaf": True,
-                "keys": node.keys,
-                "records": node.records,
-                "next_leaf": node.next_leaf
-            })
-        else:
-            self.dm.write_page(pid, {
-                "is_leaf": False,
-                "keys": node.keys,
-                "children": node.children
-            })
-
-    def _max_keys(self, is_leaf: bool) -> int:
-        return self.order_hint
-
-    def _min_keys(self, is_leaf: bool) -> int:
-        mk = max(1, (self._max_keys(is_leaf) + 1)//2 - 1) if is_leaf else max(1, (self._max_keys(is_leaf)+1)//2 - 1)
-        return mk
+        self.dsk = Disk(filename)
+        self.order = order_hint
+        if self.dsk.root_pid == 0:
+            # crear primera hoja vacía
+            leaf_pid = self.dsk.alloc()
+            self.dsk.write_raw(leaf_pid, LeafPage().pack())
+            self.dsk.set_root(leaf_pid)
 
 
-    def search(self, key: Any) -> List[Dict[str, Any]]:
-        pid = self.dm.root_pid
-        node, is_leaf = self._load_node(pid)
-        path = [pid]
+    def _load(self, pid: int):
+        raw = self.dsk.read_raw(pid)
+        if is_leaf_page(raw): return LeafPage.unpack(raw), True
+        return read_internal(self.dsk, pid), False
+
+    def _save(self, pid: int, node, is_leaf: bool):
+        if is_leaf: self.dsk.write_raw(pid, node.pack())
+        else:       write_internal(self.dsk, pid, node)
+
+    def search(self, key: int) -> List[Record]:
+        pid = self.dsk.root_pid
+        node, is_leaf = self._load(pid)
         while not is_leaf:
             idx = bisect.bisect_left(node.keys, key)
             pid = node.children[idx]
-            node, is_leaf = self._load_node(pid)
-            path.append(pid)
-        i = bisect.bisect_left(node.keys, key)
-        res = []
-        while i < len(node.keys) and node.keys[i] == key:
-            res.append(node.records[i])
-            i += 1
-        return res
+            node, is_leaf = self._load(pid)
+        keys = [r.employee_id for r in node.recs]
+        i = bisect.bisect_left(keys, key)
+        out: List[Record] = []
+        while i < len(node.recs) and node.recs[i].employee_id == key:
+            out.append(node.recs[i]); i += 1
+        return out
 
-    def range_search(self, lo: Any, hi: Any) -> Iterable[Dict[str, Any]]:
-        pid = self.dm.root_pid
-        node, is_leaf = self._load_node(pid)
+    def range_search(self, lo: int, hi: int) -> Iterable[Record]:
+        pid = self.dsk.root_pid
+        node, is_leaf = self._load(pid)
         while not is_leaf:
             idx = bisect.bisect_left(node.keys, lo)
             pid = node.children[idx]
-            node, is_leaf = self._load_node(pid)
-
-
+            node, is_leaf = self._load(pid)
         while True:
-            i = bisect.bisect_left(node.keys, lo)
-            while i < len(node.keys) and node.keys[i] <= hi:
-                yield node.records[i]
-                i += 1
-            if node.next_leaf == 0:
-                break
-
-            nxt, _ = self._load_node(node.next_leaf)
-            if len(nxt.keys) == 0 or nxt.keys[0] > hi:
-                break
+            keys = [r.employee_id for r in node.recs]
+            i = bisect.bisect_left(keys, lo)
+            while i < len(node.recs) and node.recs[i].employee_id <= hi:
+                yield node.recs[i]; i += 1
+            if node.next_leaf == 0: break
+            nxt, leaf = self._load(node.next_leaf)
+            if not leaf or (len(nxt.recs) and nxt.recs[0].employee_id > hi): break
             node = nxt
 
+    def insert(self, key: int, rec: Record):
+        split = self._ins_rec(self.dsk.root_pid, key, rec)
+        if split is not None:
+            sep_key, right_pid = split
+            old_root = self.dsk.root_pid
+            new_root = InternalNode(False, [sep_key], [old_root, right_pid])
+            new_pid = self.dsk.alloc()
+            self._save(new_pid, new_root, False)
+            self.dsk.set_root(new_pid)
 
-    def insert(self, key: Any, record: Dict[str, Any]):
-        root_pid = self.dm.root_pid
-        new_child = self._insert_recursive(root_pid, key, record)
-        if new_child is not None:
-            sep_key, right_pid = new_child
-            old_root_pid = root_pid
-            new_root = InternalNode(is_leaf=False, keys=[sep_key], children=[old_root_pid, right_pid])
-            new_root_pid = self.dm.alloc_page()
-            self._save_node(new_root_pid, new_root)
-            self.dm.set_root(new_root_pid)
-
-    def _insert_recursive(self, pid: int, key: Any, record: Dict[str, Any]):
-        node, is_leaf = self._load_node(pid)
+    def _ins_rec(self, pid: int, key: int, rec: Record):
+        node, is_leaf = self._load(pid)
         if is_leaf:
-            pos = bisect.bisect_right(node.keys, key)
-            node.keys.insert(pos, key)
-            node.records.insert(pos, record)
-            if len(node.keys) > self._max_keys(True):
-                return self._split_leaf(pid, node)
-            else:
-                self._save_node(pid, node)
+            pos = bisect.bisect_right([r.employee_id for r in node.recs], key)
+            node.recs.insert(pos, rec)
+            if len(node.recs) <= BLOCK_FACTOR:
+                self._save(pid, node, True)
                 return None
+
+            mid = len(node.recs) // 2
+            right_recs = node.recs[mid:]
+            node.recs   = node.recs[:mid]
+            right = LeafPage(right_recs, prev_leaf=pid, next_leaf=node.next_leaf)
+            right_pid = self.dsk.alloc()
+            node.next_leaf = right_pid
+            self._save(pid, node, True)
+            self._save(right_pid, right, True)
+            sep_key = right.recs[0].employee_id
+            return (sep_key, right_pid)
         else:
             idx = bisect.bisect_left(node.keys, key)
             child_pid = node.children[idx]
-            split_info = self._insert_recursive(child_pid, key, record)
-            if split_info is None:
-                return None
-            sep_key, right_pid = split_info
-            node.keys.insert(idx, sep_key)
+            split = self._ins_rec(child_pid, key, rec)
+            if split is None: return None
+            sep, right_pid = split
+            node.keys.insert(idx, sep)
             node.children.insert(idx+1, right_pid)
-            if len(node.keys) > self._max_keys(False):
-                return self._split_internal(pid, node)
-            else:
-                self._save_node(pid, node)
+            if len(node.keys) <= self.order:
+                self._save(pid, node, False)
                 return None
 
-    def _split_leaf(self, pid: int, node: LeafNode):
-        mid = len(node.keys) // 2
-        right = LeafNode(
-            is_leaf=True,
-            keys=node.keys[mid:],
-            records=node.records[mid:],
-            next_leaf=node.next_leaf
-        )
-        node.keys = node.keys[:mid]
-        node.records = node.records[:mid]
-        right_pid = self.dm.alloc_page()
-        node.next_leaf = right_pid
-        self._save_node(pid, node)
-        self._save_node(right_pid, right)
-        sep_key = right.keys[0]
-        return (sep_key, right_pid)
+            mid = len(node.keys) // 2
+            sep_up = node.keys[mid]
+            right = InternalNode(False, node.keys[mid+1:], node.children[mid+1:])
+            node.keys = node.keys[:mid]
+            node.children = node.children[:mid+1]
+            right_pid2 = self.dsk.alloc()
+            self._save(pid, node, False)
+            self._save(right_pid2, right, False)
+            return (sep_up, right_pid2)
 
-    def _split_internal(self, pid: int, node: InternalNode):
-        mid = len(node.keys)//2
-        sep_key = node.keys[mid]
-        right = InternalNode(
-            is_leaf=False,
-            keys=node.keys[mid+1:],
-            children=node.children[mid+1:]
-        )
-        node.keys = node.keys[:mid]
-        node.children = node.children[:mid+1]
-        right_pid = self.dm.alloc_page()
-        self._save_node(pid, node)
-        self._save_node(right_pid, right)
-        return (sep_key, right_pid)
 
-    def remove(self, key: Any, only_first: bool = False) -> int:
-        removed, root_shrunk = self._remove_recursive(self.dm.root_pid, key, only_first)
-        root, is_leaf = self._load_node(self.dm.root_pid)
-        if not is_leaf and len(root.children) == 1:
-            self.dm.set_root(root.children[0])
+    def remove(self, key: int, only_first: bool = False) -> int:
+        removed = self._rem_rec(self.dsk.root_pid, key, only_first)
+        root, leaf = self._load(self.dsk.root_pid)
+        if (not leaf) and len(root.children) == 1:
+            self.dsk.set_root(root.children[0])
         return removed
 
-    def _remove_recursive(self, pid: int, key: Any, only_first: bool) -> Tuple[int, bool]:
-        node, is_leaf = self._load_node(pid)
+    def _rem_rec(self, pid: int, key: int, only_first: bool) -> int:
+        node, is_leaf = self._load(pid)
         if is_leaf:
-            count = 0
-            i = bisect.bisect_left(node.keys, key)
-            while i < len(node.keys) and node.keys[i] == key:
-                node.keys.pop(i)
-                node.records.pop(i)
-                count += 1
+            keys = [r.employee_id for r in node.recs]
+            i = bisect.bisect_left(keys, key)
+            cnt = 0
+            while i < len(node.recs) and node.recs[i].employee_id == key:
+                node.recs.pop(i); cnt += 1
                 if only_first: break
-            self._save_node(pid, node)
-            return count, self._underflow_leaf_fix(pid, node)
-        else:
-            idx = bisect.bisect_left(node.keys, key)
-            child_pid = node.children[idx]
-            removed, _ = self._remove_recursive(child_pid, key, only_first)
-            if removed == 0:
-                return 0, False
-            child, child_is_leaf = self._load_node(child_pid)
-            self._save_node(pid, node)
-            self._underflow_internal_fix(pid)
-            return removed, False
-
-    def _underflow_leaf_fix(self, pid: int, node: LeafNode) -> bool:
-        if pid == self.dm.root_pid:
-            self._save_node(pid, node)
-            return False
-        if len(node.keys) >= self._min_keys(True):
-            self._save_node(pid, node)
-            return False
-        parent_pid, parent, idx = self._find_parent_and_index(pid)
-        if idx > 0:
-            left_pid = parent.children[idx-1]
-            left, _ = self._load_node(left_pid)
-            if len(left.keys) > self._min_keys(True):
-                node.keys.insert(0, left.keys.pop())
-                node.records.insert(0, left.records.pop())
-                parent.keys[idx-1] = node.keys[0]
-                self._save_node(left_pid, left)
-                self._save_node(pid, node)
-                self._save_node(parent_pid, parent)
-                return False
-        if idx < len(parent.children)-1:
-            right_pid = parent.children[idx+1]
-            right, _ = self._load_node(right_pid)
-            if len(right.keys) > self._min_keys(True):
-                node.keys.append(right.keys.pop(0))
-                node.records.append(right.records.pop(0))
-                parent.keys[idx] = right.keys[0] if right.keys else parent.keys[idx]
-                self._save_node(right_pid, right)
-                self._save_node(pid, node)
-                self._save_node(parent_pid, parent)
-                return False
-        if idx > 0:
-            left_pid = parent.children[idx-1]
-            left, _ = self._load_node(left_pid)
-            left.keys.extend(node.keys)
-            left.records.extend(node.records)
-            left.next_leaf = node.next_leaf
-            self._save_node(left_pid, left)
-            parent.keys.pop(idx-1)
-            parent.children.pop(idx)
-            self._save_node(parent_pid, parent)
-            self.dm.free_page(pid)
-        else:
-            right_pid = parent.children[idx+1]
-            right, _ = self._load_node(right_pid)
-            node.keys.extend(right.keys)
-            node.records.extend(right.records)
-            node.next_leaf = right.next_leaf
-            self._save_node(pid, node)
-            parent.keys.pop(idx)
-            parent.children.pop(idx+1)
-            self._save_node(parent_pid, parent)
-            self.dm.free_page(right_pid)
-        self._underflow_internal_fix(parent_pid)
-        return True
-
-    def _underflow_internal_fix(self, pid: int) -> bool:
-        if pid == self.dm.root_pid:
-            node, leaf = self._load_node(pid)
-            self._save_node(pid, node)
-            return False
-        node, _ = self._load_node(pid)
-        if len(node.keys) >= self._min_keys(False):
-            self._save_node(pid, node)
-            return False
-        parent_pid, parent, idx = self._find_parent_and_index(pid)
-        if idx > 0:
-            left_pid = parent.children[idx-1]
-            left, _ = self._load_node(left_pid)
-            if len(left.keys) > self._min_keys(False):
-                sep = parent.keys[idx-1]
-                node.children.insert(0, left.children.pop())
-                node.keys.insert(0, sep)
-                parent.keys[idx-1] = left.keys.pop()
-                self._save_node(left_pid, left)
-                self._save_node(pid, node)
-                self._save_node(parent_pid, parent)
-                return False
-        if idx < len(parent.children)-1:
-            right_pid = parent.children[idx+1]
-            right, _ = self._load_node(right_pid)
-            if len(right.keys) > self._min_keys(False):
-                sep = parent.keys[idx]
-                node.children.append(right.children.pop(0))
-                node.keys.append(sep)
-                parent.keys[idx] = right.keys.pop(0)
-                self._save_node(right_pid, right)
-                self._save_node(pid, node)
-                self._save_node(parent_pid, parent)
-                return False
-        if idx > 0:
-            left_pid = parent.children[idx-1]
-            left, _ = self._load_node(left_pid)
-            left.keys.append(parent.keys.pop(idx-1))
-            left.keys.extend(node.keys)
-            left.children.extend(node.children)
-            self._save_node(left_pid, left)
-            parent.children.pop(idx)
-            self._save_node(parent_pid, parent)
-            self.dm.free_page(pid)
-        else:
-            right_pid = parent.children[idx+1]
-            right, _ = self._load_node(right_pid)
-            node.keys.append(parent.keys.pop(idx))
-            node.keys.extend(right.keys)
-            node.children.extend(right.children)
-            self._save_node(pid, node)
-            parent.children.pop(idx+1)
-            self._save_node(parent_pid, parent)
-            self.dm.free_page(right_pid)
-        self._underflow_internal_fix(parent_pid)
-        return True
-
-    def _find_parent_and_index(self, child_pid: int) -> Tuple[int, InternalNode, int]:
-        if child_pid == self.dm.root_pid:
-            raise ValueError("La raíz no tiene padre")
-        pid = self.dm.root_pid
-        parent_pid = 0
-        parent = None
-        while True:
-            node, is_leaf = self._load_node(pid)
-            if is_leaf:
-                raise RuntimeError("No se encontró padre (árbol corrupto)")
-            for i, cpid in enumerate(node.children):
-                if cpid == child_pid:
-                    return pid, node, i
-            for cpid in node.children:
-                sub, is_leaf = self._load_node(cpid)
-                if not is_leaf:
-                    found = self._contains_desc(cpid, child_pid)
-                    if found:
-                        parent_pid, parent = pid, node
-                        pid = cpid
-                        break
-                else:
-                    if cpid == child_pid:
-                        return pid, node, node.children.index(cpid)
-            else:
-                for i, cpid in enumerate(node.children):
-                    if cpid == child_pid:
-                        return pid, node, i
-                raise RuntimeError("Padre no encontrado (descenso falló)")
-
-    def _contains_desc(self, pid: int, target: int) -> bool:
-        node, is_leaf = self._load_node(pid)
-        if is_leaf:
-            return False
-        if target in node.children:
-            return True
-        for c in node.children:
-            sub, leaf = self._load_node(c)
-            if not leaf and self._contains_desc(c, target):
-                return True
-        return False
+            self._save(pid, node, True)
+            return cnt
+        idx = bisect.bisect_left(node.keys, key)
+        child_pid = node.children[idx]
+        removed = self._rem_rec(child_pid, key, only_first)
+        if removed == 0: return 0
+        self._save(pid, node, False)
+        return removed
 
     def close(self):
-        self.dm.close()
+        self.dsk.close()
 
 
-
-
-
-
-
-
-
-
+def row_to_record(row: Dict[str, str]) -> Record:
+    return Record(
+        employee_id      = int(row["Employee_ID"]),
+        name             = row["Name"],
+        age              = int(row["Age"]),
+        gender           = row["Gender"],
+        department       = row["Department"],
+        job_title        = row["Job_Title"],
+        salary           = int(row["Salary"]),
+        experience_years = int(row["Experience_Years"]),
+        education_level  = row["Education_Level"],
+        location         = row["Location"],
+    )
 
 
 if __name__ == "__main__":
+    csv_path = "../../data/Employers_data.csv"
+    if os.path.exists("employees.bpt"): os.remove("employees.bpt")
+    bpt = BPlusClustered("employees.bpt", order_hint=64)
 
-    if os.path.exists("inventario.bpt"):
-        os.remove("inventario.bpt")
 
-    bpt = BPlusTreeFile("inventario.bpt", order_hint=64)
+    rows: List[Dict[str, Any]] = []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        rdr = csv.DictReader(f)
+        for r in rdr:
+            rows.append(r)
 
-    for pid in [10, 5, 20, 15, 8, 7, 30, 25, 40, 1, 2, 3, 4, 6, 9, 11, 12]:
-        bpt.insert(pid, {
-            "id": pid,
-            "nombre": f"Producto {pid}",
-            "categoria": "general",
-            "precio": pid * 1.5
-        })
+    recs = [row_to_record(r) for r in rows]
+    for r in recs:
+        bpt.insert(r.employee_id, r)
 
-    print("search(15) ->", bpt.search(15))
-    print("range [5,12]:")
-    for r in bpt.range_search(5, 12):
-        print(r["id"], r["nombre"])
+    if recs:
+        k = recs[len(recs)//2].employee_id
+        print("search(", k, ") ->", len(bpt.search(k)))
 
-    print("remove(8) ->", bpt.remove(8))
-    print("range [1,12] tras remove:")
-    for r in bpt.range_search(1, 12):
-        print(r["id"], r["nombre"])
+        lo = recs[len(recs)//3].employee_id
+        hi = recs[len(recs)//3 * 2].employee_id
+        lo, hi = min(lo, hi), max(lo, hi)
+        cnt = sum(1 for _ in bpt.range_search(lo, hi))
+        print(f"range_search({lo}..{hi}) ->", cnt)
 
+        rem = bpt.remove(k, only_first=True)
+        print("remove(", k, ") ->", rem)
+
+    print("Leaf BLOCK_FACTOR:", BLOCK_FACTOR)
     print("I/O reads:", IO.reads, "writes:", IO.writes)
     bpt.close()
