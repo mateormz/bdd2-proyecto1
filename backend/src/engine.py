@@ -1,3 +1,4 @@
+# backend/src/engine.py
 from typing import Any, Dict, List, Optional, Tuple
 import os
 import csv
@@ -158,36 +159,49 @@ class Engine:
             data_path = tinfo["data_path"] or os.path.join(out_dir, f"{table}.dat")
 
             idx_type, col = stmt.using_index
+
+            if idx_type == IndexType.ISAM:
+                schema = self._schema_with_deleted(schema)
+
             if idx_type == IndexType.BTREE:
                 idx_path = os.path.join(out_dir, f"{table}_bptree.idx")
                 c = ClusteredIndexFile(data_path, idx_path, schema, col, self._infer_kind(schema, col))
                 c.build_from_csv(stmt.from_file)
                 self.catalog.register_table(table, schema, data_path)
                 self.catalog.register_index(table, col, IndexType.BTREE, idx_path)
+
             elif idx_type == IndexType.ISAM:
                 idx_path = os.path.join(out_dir, f"{table}_isam.dat")
                 isam = ISAMFile(idx_path, schema, col)
                 isam.build_from_csv(stmt.from_file)
-                self.catalog.register_table(table, schema, data_path)
+                self.catalog.register_table(table, schema, data_path)  # guarda schema ya extendido
                 self.catalog.register_index(table, col, IndexType.ISAM, idx_path)
+
             elif idx_type == IndexType.EXTENDIBLE_HASH:
                 idx_path = os.path.join(out_dir, f"{table}_exthash.dat")
                 eh = ExtendibleHashing(idx_path, schema, key_field=col)
                 with open(stmt.from_file, newline='', encoding="utf-8") as f:
                     r = csv.DictReader(f)
                     for row in r:
-                        if "deleted" in [fld.name for fld in schema.fields] and "deleted" not in row:
+                        # si el schema ya tiene deleted, inicialízalo en 0
+                        if any(fld.name == "deleted" for fld in schema.fields) and "deleted" not in row:
                             row["deleted"] = 0
                         eh.insert(row)
                 self.catalog.register_table(table, schema, data_path)
                 self.catalog.register_index(table, col, IndexType.EXTENDIBLE_HASH, idx_path)
+
             else:
                 raise ValueError(f"Índice no soportado en CREATE FROM FILE: {idx_type}")
+
             return {"ok": True, "action": "create_from_file", "table": table}
 
         # CREATE TABLE ... (schema)
         table = stmt.table_name
         schema = self._build_schema_from_columns(stmt.columns)
+
+        if any(c.index_type == IndexType.ISAM for c in stmt.columns if c.is_key or c.index_type):
+            schema = self._schema_with_deleted(schema)
+
         data_path = os.path.join(out_dir, f"{table}.dat")
         self.catalog.register_table(table, schema, data_path)
 
@@ -196,17 +210,18 @@ class Engine:
             if col.index_type == IndexType.BTREE:
                 idx_path = os.path.join(out_dir, f"{table}_{col.name}_bptree.idx")
                 c = ClusteredIndexFile(data_path, idx_path, schema, col.name, self._infer_kind(schema, col.name))
-                # crea pickle vacío
                 if not os.path.exists(data_path):
                     open(data_path, "ab").close()
                 c._rebuild_index()
                 self.catalog.register_index(table, col.name, IndexType.BTREE, idx_path)
+
             elif col.index_type == IndexType.EXTENDIBLE_HASH:
                 idx_path = os.path.join(out_dir, f"{table}_{col.name}_exthash.dat")
                 ExtendibleHashing(idx_path, schema, key_field=col.name)
                 self.catalog.register_index(table, col.name, IndexType.EXTENDIBLE_HASH, idx_path)
+
             elif col.index_type == IndexType.ISAM:
-                # ISAM vacío no se inicializa aquí
+                # ISAM vacío no se construye aquí (se hará con FROM FILE o con inserts/operaciones)
                 pass
 
         return {"ok": True, "action": "create_schema", "table": table}
@@ -223,7 +238,8 @@ class Engine:
         row: Dict[str, Any] = {}
         for f, v in zip(schema.fields, stmt.values):
             row[f.name] = v
-        if "deleted" in [fld.name for fld in schema.fields] and row.get("deleted") is None:
+
+        if any(fld.name == "deleted" for fld in schema.fields) and row.get("deleted") is None:
             row["deleted"] = 0
 
         # ExtHash (si existe)
@@ -330,8 +346,10 @@ class Engine:
             t = bucket["type"]
             name = getattr(t, "name", str(t)).upper()
             val = getattr(t, "value", name).upper()
-            if kind_name == "bptree"  and ("BTREE" in (name, val)):                 return bucket
-            if kind_name == "isam"    and ("ISAM"  in  name):                       return bucket
+            if kind_name == "bptree"  and ("BTREE" in (name, val)):
+                return bucket
+            if kind_name == "isam"    and ("ISAM"  in  name):
+                return bucket
             if kind_name == "exthash" and (name=="EXTENDIBLE_HASH" or val=="EXTHASH"):
                 return bucket
             return None
@@ -339,8 +357,10 @@ class Engine:
             t = meta["type"]
             name = getattr(t, "name", str(t)).upper()
             val  = getattr(t, "value", name).upper()
-            if kind_name == "bptree"  and ("BTREE" in (name, val)):                 return meta
-            if kind_name == "isam"    and ("ISAM"  in  name):                       return meta
+            if kind_name == "bptree"  and ("BTREE" in (name, val)):
+                return meta
+            if kind_name == "isam"    and ("ISAM"  in  name):
+                return meta
             if kind_name == "exthash" and (name=="EXTENDIBLE_HASH" or val=="EXTHASH"):
                 return meta
         return None
@@ -363,3 +383,9 @@ class Engine:
             else:
                 raise ValueError(f"Tipo no soportado: {c.data_type}")
         return Schema(fields)
+
+    def _schema_with_deleted(self, schema: Schema) -> Schema:
+        if any(f.name == "deleted" for f in schema.fields):
+            return schema
+        fields = list(schema.fields) + [Field("deleted", Kind.INT, fmt="B")]
+        return Schema(fields, deleted_name="deleted")
