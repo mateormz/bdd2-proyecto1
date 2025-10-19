@@ -1,5 +1,5 @@
 import struct, os, csv
-from src.core.schema import Schema, Field, Kind
+from core.schema import Schema, Field, Kind
 
 BLOCK_FACTOR = 50  # Factor de bloque para páginas de datos
 INDEX_BLOCK_FACTOR = 20  # Factor de bloque para nodos de índice
@@ -475,7 +475,7 @@ if __name__ == "__main__":
     isam.scanIndex()
 
     
-
+    '''
     # Búsquedas simples
     print("\n=== TEST: SEARCH ===")
     for qid in (1, 5000, 10000):
@@ -528,3 +528,7 @@ if __name__ == "__main__":
     results = isam.rangeSearch(4995, 5005)
     for r in results:
         print(r)
+
+    '''
+
+    # python -m src.index.isam
