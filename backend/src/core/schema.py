@@ -3,13 +3,11 @@ import struct
 from dataclasses import dataclass
 from enum import Enum
 
-
 class Kind(Enum):
     INT = 'INT';
     FLOAT = 'FLOAT';
     CHAR = 'CHAR';
     DATE = 'DATE'
-
 
 @dataclass
 class Field:
@@ -58,7 +56,6 @@ class Schema:
             else:
                 row[f.name] = v
         return row
-
 
 if __name__ == "__main__":
     fields = [

@@ -1,0 +1,23 @@
+.query-editor-container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.sql-textarea-custom {
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace !important;
+  font-size: 14px !important;
+  line-height: 1.6 !important;
+  background-color: #fafafa !important;
+  transition: background-color 0.2s ease !important;
+}
+
+.sql-textarea-custom:focus {
+  background-color: white !important;
+}
+
+@media (max-width: 768px) {
+  .sql-textarea-custom {
+    font-size: 16px !important;
+  }
+}
