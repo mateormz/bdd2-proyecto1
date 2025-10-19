@@ -12,7 +12,10 @@ class Catalog:
     def register_index(self, table: str, column: str, idx_type: IndexType, path: str) -> None:
         if table not in self.tables:
             raise ValueError(f"Tabla '{table}' no registrada")
-        self.tables[table]["indexes"][column] = {"type": idx_type, "path": path}
+        idxs = self.tables[table].setdefault("indexes", {})
+        col = column
+        bucket = idxs.setdefault(col, {})   # <- dict por columna
+        bucket[idx_type.name] = {"type": idx_type, "path": path}
 
     def get_table(self, name: str) -> Dict[str, Any]:
         return self.tables.get(name, {})
