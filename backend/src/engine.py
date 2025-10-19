@@ -78,37 +78,47 @@ class Engine:
     def _plan_range(self, col: str) -> Dict[str, Any]:
         return {"kind": "range", "col": col}
 
-    def _has_index(self, indexes: Dict[str, Dict[str, Any]], col: str, idx_kind_name: str) -> bool:
-        meta = indexes.get(col)
-        return bool(meta and meta["type"].name.upper().startswith(idx_kind_name.upper()))
+    def _has_index(self, indexes, col, kind):
+        bucket = indexes.get(col, {})
+        # bucket ahora es dict: {"BTREE": {...}, "ISAM": {...}, "EXTENDIBLE_HASH": {...}}
+        kind_u = kind.upper()
+        for k, meta in bucket.items():
+            name = getattr(meta["type"], "name", k).upper()
+            val  = getattr(meta["type"], "value", name).upper()
+            if kind_u in ("EXTHASH","EXTENDIBLE_HASH"):
+                if name=="EXTENDIBLE_HASH" or val=="EXTHASH": return True
+            if kind_u=="BTREE" and "BTREE" in (name, val): return True
+            if kind_u=="ISAM"  and "ISAM"  in name:        return True
+        return False
 
     # === Ejecutores de plan ===
-    def _run_plan(self, plan: Dict[str, Any], stmt: SelectStatement, data_path: str,
-                  schema: Schema, indexes: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _run_plan(self, plan, stmt, data_path, schema, indexes):
         wc = stmt.where_clause
 
         if plan["kind"] == "seq":
-            raise NotImplementedError(
-                "Consulta requiere full scan, pero el lector secuencial aún no está implementado."
-            )
+            raise NotImplementedError("Consulta requiere full scan, pero el lector secuencial aún no está implementado.")
 
         if plan["kind"] == "exthash":
-            idx_meta = indexes[plan["col"]]
+            idx_meta = self._get_index_meta(indexes, plan["col"], "exthash")
+            if not idx_meta:
+                return []
             eh = ExtendibleHashing(os.path.basename(idx_meta["path"]), schema, plan["col"])
             key = wc["value"]
             rec = eh.search(key)
             return [rec] if rec else []
 
         if plan["kind"] == "bptree":
-            idx_meta = indexes[plan["col"]]
-            bpt = ClusteredIndexFile(
-                data_path, idx_meta["path"], schema, plan["col"], self._infer_kind(schema, plan["col"])
-            )
+            idx_meta = self._get_index_meta(indexes, plan["col"], "bptree")
+            if not idx_meta:
+                return []
+            bpt = ClusteredIndexFile.load(data_path, idx_meta["path"], schema)
             key = wc["value"]
             return bpt.search(key)
 
         if plan["kind"] == "isam":
-            idx_meta = indexes[plan["col"]]
+            idx_meta = self._get_index_meta(indexes, plan["col"], "isam")
+            if not idx_meta:
+                return []
             isam = ISAMFile(idx_meta["path"], schema, plan["col"])
             key = int(wc["value"]) if self._is_int(schema, plan["col"]) else wc["value"]
             rec = isam.search(key)
@@ -117,22 +127,20 @@ class Engine:
         if plan["kind"] == "range":
             col = plan["col"]
             lo, hi = self._extract_range_bounds(wc, schema, col)
+
             if self._has_index(indexes, col, "BTree"):
-                idx_meta = indexes[col]
-                bpt = ClusteredIndexFile(
-                    data_path, idx_meta["path"], schema, col, self._infer_kind(schema, col)
-                )
+                idx_meta = self._get_index_meta(indexes, col, "bptree")
+                bpt = ClusteredIndexFile.load(data_path, idx_meta["path"], schema)
                 return bpt.range_search(lo, hi)
+
             if self._has_index(indexes, col, "ISAM"):
-                idx_meta = indexes[col]
+                idx_meta = self._get_index_meta(indexes, col, "isam")
                 isam = ISAMFile(idx_meta["path"], schema, col)
                 lo_i = int(lo) if self._is_int(schema, col) else lo
                 hi_i = int(hi) if self._is_int(schema, col) else hi
                 return isam.rangeSearch(lo_i, hi_i)
 
-            raise NotImplementedError(
-                "Rango sin índice (B+Tree/ISAM) requiere scan secuencial, aún no implementado."
-            )
+            raise NotImplementedError("Rango sin índice (B+Tree/ISAM) requiere scan secuencial, aún no implementado.")
 
         raise ValueError("Plan desconocido")
 
@@ -184,6 +192,18 @@ class Engine:
 
     def _max_of(self, schema: Schema, col: str):
         return "\uffff" if not self._is_int(schema, col) else 2**31-1
+    
+    def _get_index_meta(self, indexes, col, kind_name):
+        bucket = indexes.get(col, {})
+        for meta in bucket.values():
+            t = meta["type"]
+            if kind_name == "bptree"  and (t.name == "BTREE" or t.value.upper() == "BTREE"):
+                return meta
+            if kind_name == "isam"    and t.name == "ISAM":
+                return meta
+            if kind_name == "exthash" and (t.name == "EXTENDIBLE_HASH" or t.value.upper() == "EXTHASH"):
+                return meta
+        return None
 
     def _exec_insert(self, stmt: InsertStatement) -> Dict[str, Any]:
         raise NotImplementedError("INSERT aún no implementado en Engine")
