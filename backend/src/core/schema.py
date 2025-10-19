@@ -50,3 +50,27 @@ class Schema:
             else:
                 row[f.name] = v
         return row
+    
+if __name__ == "__main__":
+    fields = [
+        Field("id", Kind.INT, fmt="i"),
+        Field("nombre", Kind.CHAR, size=20),
+        Field("precio", Kind.FLOAT, fmt="f"),
+        Field("fecha", Kind.DATE)
+    ]
+    schema = Schema(fields)
+
+    row = {
+        "id": 101,
+        "nombre": "Producto A",
+        "precio": 12.5,
+        "fecha": "2025-10-18"
+    }
+
+    print("Row original:", row)
+
+    packed = schema.pack(row)
+    print("Bytes empaquetados:", packed)
+
+    unpacked = schema.unpack(packed)
+    print("Row recuperado:", unpacked)
