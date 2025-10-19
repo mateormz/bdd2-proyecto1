@@ -441,22 +441,22 @@ class ISAMFile:
 
 
 if __name__ == "__main__":
-    # Definir el schema
+    # Definir el schema según Employers_data.csv
     fields = [
-        Field("Employee_ID",    Kind.INT,   fmt="i"),
-        Field("Name",           Kind.CHAR,  size=40),
-        Field("Age",            Kind.INT,   fmt="i"),
-        Field("Gender",         Kind.CHAR,  size=10),
-        Field("Department",     Kind.CHAR,  size=20),
-        Field("Job_Title",      Kind.CHAR,  size=30),
-        Field("Experience_Years", Kind.INT, fmt="i"),
-        Field("Education_Level", Kind.CHAR, size=15),
-        Field("Location",       Kind.CHAR,  size=20),
-        Field("Salary",         Kind.INT,   fmt="i"),
-        Field("deleted",        Kind.INT,   fmt="B"),
+        Field("Employee_ID",        Kind.INT,   fmt="i"),
+        Field("Name",               Kind.CHAR,  size=40),
+        Field("Age",                Kind.INT,   fmt="i"),
+        Field("Gender",             Kind.CHAR,  size=10),
+        Field("Department",         Kind.CHAR,  size=20),
+        Field("Job_Title",          Kind.CHAR,  size=30),
+        Field("Experience_Years",   Kind.INT,   fmt="i"),
+        Field("Education_Level",    Kind.CHAR,  size=15),
+        Field("Location",           Kind.CHAR,  size=20),
+        Field("Salary",             Kind.INT,   fmt="i"),
+        Field("deleted",            Kind.INT,   fmt="B"),
     ]
     schema = Schema(fields, deleted_name='deleted')
-    
+
     # Limpiar archivos anteriores
     for fname in ['data.dat', 'data.dat_idx1', 'data.dat_idx2']:
         try:
@@ -464,55 +464,67 @@ if __name__ == "__main__":
         except FileNotFoundError:
             pass
 
+    # Construcción del ISAM
     isam = ISAMFile('data.dat', schema, key_field='Employee_ID')
     print("=== CONSTRUCCIÓN DEL ISAM ===")
-    isam.build_from_csv('data/Employers_data.csv')
-    
-    print("\n=== ESTRUCTURA DE DATOS (Nivel 0) ===")
-    isam.scanAll()
-    
+    isam.build_from_csv('data/Employers_data.csv', delimiter=',')
+
+
+    # Ver índice
     print("\n=== ESTRUCTURA DE ÍNDICES ===")
     isam.scanIndex()
 
     
 
-    # Búsqueda
-    print("\n=== BÚSQUEDA ===")
-    qid = 403
-    rec = isam.search(qid)
-    if rec:
-        print(f"FOUND: {rec}")
-    else:
-        print(f"NOT FOUND: {qid}")
+    # Búsquedas simples
+    print("\n=== TEST: SEARCH ===")
+    for qid in (1, 5000, 10000):
+        rec = isam.search(qid)
+        if rec:
+            print("FOUND:", rec)
+        else:
+            print("NOT FOUND:", qid)
 
     
 
-    # Inserción (debe llenar nodos primero)
-    print("\n=== INSERCIÓN 1 (llenar página) ===")
-    isam.insert({"sale_id": 405, "product_name": "NEW ITEM A", "quantity": 10, "unit_price": 99.99, "sale_date": "2025-01-01", "deleted": 0})
+    # Range search pequeño
+    print("\n=== TEST: RANGE SEARCH [250..255] ===")
+    results = isam.rangeSearch(250, 255)
+    for r in results:
+        print(r)
+
+    
+
+    # Insertar nuevo empleado
+    print("\n=== TEST: INSERT (id=10001) ===")
+    new_emp = {
+        "Employee_ID": 10001,
+        "Name": "New Hire",
+        "Age": 27,
+        "Gender": "Female",
+        "Department": "Engineering",
+        "Job_Title": "Engineer",
+        "Experience_Years": 3,
+        "Education_Level": "Master",
+        "Location": "Austin",
+        "Salary": 105000,
+        "deleted": 0
+    }
+    isam.insert(new_emp)
     isam.scanAll()
-
-    '''
-
-    # Inserción que fuerza overflow (chaining)
-    print("\n=== INSERCIÓN 2 (debe crear overflow) ===")
-    isam.insert({"sale_id": 406, "product_name": "NEW ITEM B", "quantity": 5, "unit_price": 50.00, "sale_date": "2025-01-02", "deleted": 0})
-    isam.scanAll()
-
-    # Delete
-    print("\n=== DELETE ===")
-    ok = isam.delete(405)
-    print(f"delete(405): {ok}")
-    isam.scanAll()
-
-    # Verificar que el índice NO cambió
-    print("\n=== ÍNDICE (debe permanecer estático) ===")
     isam.scanIndex()
 
-    print("\n--- Rango 100-400 (múltiples páginas) ---")
-    results = isam.rangeSearch(100, 400)
-    print(f"Encontrados: {len(results)} registros")
-    for r in results:
-        print(f"  {r}")
+    print("Inserted:", isam.search(10001))
 
-    '''
+    # Borrar uno existente
+    print("\n=== TEST: DELETE (id=5000) ===")
+    ok = isam.delete(5000)
+    print("delete(5000):", ok)
+    print("search(5000):", isam.search(5000))
+
+    
+    # Range después del delete
+    print("\n=== TEST: RANGE [4995..5005] ===")
+    results = isam.rangeSearch(4995, 5005)
+    for r in results:
+        print(r)
