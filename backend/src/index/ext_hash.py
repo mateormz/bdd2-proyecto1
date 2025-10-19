@@ -54,7 +54,8 @@ class Bucket:
 
 class ExtendibleHashing:
     def __init__(self, filename: str, schema: Schema, key_field: str, hash_function=None):
-        out_dir = "../../out"
+        out_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'out'))
+        os.makedirs(out_dir, exist_ok=True)
         
         if not filename.endswith('.dat'):
             filename = filename + '.dat'
