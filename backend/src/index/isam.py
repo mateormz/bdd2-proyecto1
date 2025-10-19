@@ -1,6 +1,13 @@
 import struct, os, csv
 from core.schema import Schema, Field, Kind
 
+def _project_root() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+OUT_DIR = os.path.join(_project_root(), "out")
+DATA_DIR = os.path.join(_project_root(), "data")
+os.makedirs(OUT_DIR, exist_ok=True)
+
 BLOCK_FACTOR = 50  # Factor de bloque para páginas de datos
 INDEX_BLOCK_FACTOR = 20  # Factor de bloque para nodos de índice
 
@@ -94,9 +101,16 @@ class ISAMFile:
     - Nivel 0: páginas de datos
     """
     def __init__(self, filename, schema: Schema, key_field: str):
-        self.filename = filename  # Nivel 0: datos
-        self.filename_idx1 = filename + '_idx1'  # Nivel 1: índice intermedio
-        self.filename_idx2 = filename + '_idx2'  # Nivel 2: índice root
+
+        base_data_path = (
+            filename if os.path.isabs(filename)
+            else os.path.join(OUT_DIR, os.path.basename(filename))
+        )
+        base_no_ext, _ = os.path.splitext(base_data_path)
+
+        self.filename = base_data_path           # Nivel 0: datos
+        self.filename_idx1 = base_no_ext + '_idx1'  # Nivel 1: índice intermedio
+        self.filename_idx2 = base_no_ext + '_idx2'  # Nivel 2: índice root
         self.schema = schema
         self.key_field = key_field
         self.page_size = DataPage.HEADER_SIZE + BLOCK_FACTOR * schema.size
@@ -465,7 +479,7 @@ if __name__ == "__main__":
             pass
 
     # Construcción del ISAM
-    isam = ISAMFile('data.dat', schema, key_field='Employee_ID')
+    isam = ISAMFile('isam.dat', schema, key_field='Employee_ID')
     print("=== CONSTRUCCIÓN DEL ISAM ===")
     isam.build_from_csv('data/Employers_data.csv', delimiter=',')
 
@@ -474,8 +488,6 @@ if __name__ == "__main__":
     print("\n=== ESTRUCTURA DE ÍNDICES ===")
     isam.scanIndex()
 
-    
-    '''
     # Búsquedas simples
     print("\n=== TEST: SEARCH ===")
     for qid in (1, 5000, 10000):
@@ -528,7 +540,5 @@ if __name__ == "__main__":
     results = isam.rangeSearch(4995, 5005)
     for r in results:
         print(r)
-
-    '''
 
     # python -m src.index.isam
