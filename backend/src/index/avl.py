@@ -9,12 +9,20 @@ def _sfix(text: str, n: int) -> bytes:
 def _sunfix(b: bytes) -> str:
     return b.rstrip(b'\x00').decode('utf-8', errors='ignore')
 
+class IOStats:
+    def __init__(self):
+        self.reads = 0
+        self.writes = 0
+    def reset(self):
+        self.reads = 0
+        self.writes = 0
+
+IO = IOStats()
+
 class EmployeeCodec:
     _STRUCT = struct.Struct('<i30si20s20s20sf10s')
-
     def record_size(self) -> int:
         return self._STRUCT.size
-
     def pack(self, row: Dict[str, Any]) -> bytes:
         return self._STRUCT.pack(
             int(row["employee_id"]),
@@ -26,7 +34,6 @@ class EmployeeCodec:
             float(row.get("salary", 0.0)),
             _sfix(row.get("phone", ""), 10)
         )
-
     def unpack(self, b: bytes) -> Dict[str, Any]:
         emp_id, name, age, dept, pos, city, sal, phone = self._STRUCT.unpack(b)
         return {
@@ -39,7 +46,6 @@ class EmployeeCodec:
             "salary": sal,
             "phone": _sunfix(phone)
         }
-
     def key_of(self, row: Dict[str, Any]) -> int:
         return int(row["employee_id"])
 
@@ -64,41 +70,47 @@ class DataFile:
         self.reads = 0
         self.writes = 0
         self._ensure_header()
-
     def _ensure_header(self):
         self.f.seek(0, io.SEEK_END)
         if self.f.tell() == 0:
             hdr = _DATA_HDR.pack(_DATA_MAGIC, _DATA_VERSION, self.record_size, 0)
-            self.f.seek(0); self.f.write(hdr); self.f.flush(); self.writes += 1
+            self.f.seek(0); self.f.write(hdr); self.f.flush()
+            self.writes += 1
+            IO.writes += 1
         else:
             self.f.seek(0)
-            hdr = self.f.read(_DATA_HDR.size); self.reads += 1
+            hdr = self.f.read(_DATA_HDR.size)
+            self.reads += 1
+            IO.reads += 1
             magic, ver, rs, _ = _DATA_HDR.unpack(hdr)
             if magic != _DATA_MAGIC or ver != _DATA_VERSION or rs != self.record_size:
                 raise ValueError("Encabezado inválido en archivo de datos")
-
     @property
     def header_size(self): return _DATA_HDR.size
-
     def append(self, rec_bytes: bytes) -> int:
         self.f.seek(0, io.SEEK_END)
         off = self.f.tell()
-        self.f.write(rec_bytes); self.f.flush(); self.writes += 1
+        self.f.write(rec_bytes); self.f.flush()
+        self.writes += 1
+        IO.writes += 1
         return off
-
     def read_at(self, off: int) -> bytes:
         self.f.seek(off)
-        b = self.f.read(self.record_size); self.reads += 1
+        b = self.f.read(self.record_size)
+        self.reads += 1
+        IO.reads += 1
         return b
-
     def rewrite_all(self, records: List[Tuple[int, bytes]]):
         self.f.seek(0)
         hdr = _DATA_HDR.pack(_DATA_MAGIC, _DATA_VERSION, self.record_size, 0)
         self.f.write(hdr)
+        IO.writes += 1
+        self.writes += 1
         for _, b in records:
             self.f.write(b)
+            self.writes += 1
+            IO.writes += 1
         self.f.flush()
-
     def close(self): self.f.close()
 
 class IndexFile:
@@ -110,45 +122,47 @@ class IndexFile:
         self.f = open(path, mode)
         self.reads = 0; self.writes = 0
         self._ensure_header()
-
     def _ensure_header(self):
         self.f.seek(0, io.SEEK_END)
         if self.f.tell() == 0:
             hdr = _INDEX_HDR.pack(_INDEX_MAGIC, _INDEX_VERSION, _NODE_SIZE, 0, 0)
             self.f.seek(0); self.f.write(hdr); self.f.flush()
             self.writes += 1
+            IO.writes += 1
         self._read_header()
-
     def _read_header(self):
         self.f.seek(0)
-        hdr = self.f.read(_INDEX_HDR.size); self.reads += 1
+        hdr = self.f.read(_INDEX_HDR.size)
+        self.reads += 1
+        IO.reads += 1
         magic, ver, node_size, root_off, count = _INDEX_HDR.unpack(hdr)
         self.root_off, self.count = root_off, count
-
     def _write_header(self, root_off=None, count=None):
         if root_off is None: root_off = self.root_off
         if count is None: count = self.count
         hdr = _INDEX_HDR.pack(_INDEX_MAGIC, _INDEX_VERSION, _NODE_SIZE, root_off or 0, count or 0)
-        self.f.seek(0); self.f.write(hdr); self.f.flush(); self.writes += 1
+        self.f.seek(0); self.f.write(hdr); self.f.flush()
+        self.writes += 1
+        IO.writes += 1
         self.root_off, self.count = root_off or 0, count or 0
-
     def _alloc_node(self, key: int, value_off: int, height=1, left_off=0, right_off=0) -> int:
         self.f.seek(0, io.SEEK_END)
         off = self.f.tell()
-        self.f.write(_NODE.pack(key, height, left_off, right_off, value_off))
-        self.f.flush(); self.writes += 1
+        self.f.write(_NODE.pack(key, height, left_off, right_off, value_off)); self.f.flush()
+        self.writes += 1
+        IO.writes += 1
         return off
-
     def read_node(self, off: int) -> Tuple[int, int, int, int, int]:
         self.f.seek(off)
-        b = self.f.read(_NODE.size); self.reads += 1
+        b = self.f.read(_NODE.size)
+        self.reads += 1
+        IO.reads += 1
         return _NODE.unpack(b)
-
     def write_node(self, off: int, k: int, h: int, l: int, r: int, v: int):
         self.f.seek(off)
-        self.f.write(_NODE.pack(k, h, l, r, v))
-        self.f.flush(); self.writes += 1
-
+        self.f.write(_NODE.pack(k, h, l, r, v)); self.f.flush()
+        self.writes += 1
+        IO.writes += 1
     def close(self): self.f.close()
 
 def _height(idx: IndexFile, off: int) -> int:
@@ -244,28 +258,26 @@ class AVLFile:
         self.codec = EmployeeCodec()
         self.data = DataFile(data_path, self.codec.record_size(), create)
         self.index = IndexFile(index_path, create)
-
     def add(self, row: Dict[str, Any]) -> None:
         packed = self.codec.pack(row)
         data_off = self.data.append(packed)
         key = self.codec.key_of(row)
         new_root = _insert(self.index, self.index.root_off, key, data_off)
         self.index._write_header(root_off=new_root, count=self.index.count + 1)
-
     def search(self, key: int) -> List[Dict[str, Any]]:
         offs: List[int] = []
         _search(self.index, self.index.root_off, key, offs)
         return [self.codec.unpack(self.data.read_at(off)) for off in offs]
-
     def rangeSearch(self, lo: int, hi: int) -> List[Dict[str, Any]]:
         offs: List[int] = []
         _range(self.index, self.index.root_off, lo, hi, offs)
         return [self.codec.unpack(self.data.read_at(off)) for off in offs]
-
     def io_stats(self) -> Dict[str, int]:
         return {
             "data_reads": self.data.reads,
             "data_writes": self.data.writes,
             "index_reads": self.index.reads,
             "index_writes": self.index.writes,
+            "global_reads": IO.reads,
+            "global_writes": IO.writes
         }
