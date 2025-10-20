@@ -74,4 +74,3 @@ def get_counters():
         'write_bytes': _counter.write_bytes,
         'total_time_ms': _counter.total_time_ms
     }
->>>>>>> main
