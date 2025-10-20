@@ -1,52 +1,65 @@
 from __future__ import annotations
 import os, io, struct, csv
-from typing import Dict, Any, List, Tuple, Optional
+from dataclasses import dataclass
+from enum import Enum
+from typing import List, Dict, Any, Tuple, Optional
 
-def _sfix(text: str, n: int) -> bytes:
-    b = str(text).encode('utf-8', errors='ignore')[:n]
-    return b + b'\x00' * (n - len(b))
+class Kind(Enum):
+    INT = 'INT'
+    FLOAT = 'FLOAT'
+    CHAR = 'CHAR'
+    DATE = 'DATE'
 
-def _sunfix(b: bytes) -> str:
-    return b.rstrip(b'\x00').decode('utf-8', errors='ignore')
+@dataclass
+class Field:
+    name: str
+    kind: Kind
+    size: int = 0
+    fmt: str = ''
 
-class EmployeeCodec:
-    _STRUCT = struct.Struct('<i30si20s20s20sf10s')
+class Schema:
+    def __init__(self, fields, deleted_name='deleted'):
+        self.fields = fields
+        self.deleted_name = deleted_name
+        parts = []
+        for f in fields:
+            if f.kind in (Kind.INT, Kind.FLOAT):
+                parts.append(f.fmt)
+            elif f.kind == Kind.CHAR:
+                parts.append(f'{f.size}s')
+            elif f.kind == Kind.DATE:
+                parts.append('10s')
+        self.fmt = '<' + ''.join(parts)
+        self.size = struct.calcsize(self.fmt)
+        self.map = {f.name: i for i, f in enumerate(fields)}
 
-    def record_size(self) -> int:
-        return self._STRUCT.size
+    def pack(self, row: dict) -> bytes:
+        vals = []
+        for f in self.fields:
+            v = row.get(f.name)
+            if f.kind == Kind.INT:
+                vals.append(int(v or 0))
+            elif f.kind == Kind.FLOAT:
+                vals.append(float(v or 0.0))
+            elif f.kind == Kind.CHAR:
+                vals.append((v or '').encode()[:f.size].ljust(f.size, b'\x00'))
+            elif f.kind == Kind.DATE:
+                vals.append((v or '').encode()[:10].ljust(10, b'\x00'))
+        return struct.pack(self.fmt, *vals)
 
-    def pack(self, row: Dict[str, Any]) -> bytes:
-        return self._STRUCT.pack(
-            int(row["employee_id"]),
-            _sfix(row.get("name", ""), 30),
-            int(row.get("age", 0)),
-            _sfix(row.get("department", ""), 20),
-            _sfix(row.get("position", ""), 20),
-            _sfix(row.get("city", ""), 20),
-            float(row.get("salary", 0.0)),
-            _sfix(row.get("phone", ""), 10)
-        )
-
-    def unpack(self, b: bytes) -> Dict[str, Any]:
-        emp_id, name, age, dept, pos, city, sal, phone = self._STRUCT.unpack(b)
-        return {
-            "employee_id": emp_id,
-            "name": _sunfix(name),
-            "age": age,
-            "department": _sunfix(dept),
-            "position": _sunfix(pos),
-            "city": _sunfix(city),
-            "salary": sal,
-            "phone": _sunfix(phone)
-        }
-
-    def key_of(self, row: Dict[str, Any]) -> int:
-        return int(row["employee_id"])
+    def unpack(self, data: bytes) -> dict:
+        tup = struct.unpack(self.fmt, data)
+        row = {}
+        for f, v in zip(self.fields, tup):
+            if f.kind in (Kind.CHAR, Kind.DATE):
+                row[f.name] = v.decode('utf-8', 'ignore').rstrip('\x00').rstrip()
+            else:
+                row[f.name] = v
+        return row
 
 _DATA_HDR = struct.Struct('<8sIII')
 _DATA_MAGIC = b'AVLDAT01'
 _DATA_VERSION = 1
-
 _INDEX_HDR = struct.Struct('<8sIIQI')
 _INDEX_MAGIC = b'AVLIDX01'
 _INDEX_VERSION = 1
@@ -57,12 +70,9 @@ class DataFile:
     def __init__(self, path: str, record_size: int, create: bool):
         self.path = path
         self.record_size = record_size
-        mode = 'r+b'
-        if create or not os.path.exists(path):
-            mode = 'w+b'
+        mode = 'r+b' if os.path.exists(path) and not create else 'w+b'
         self.f = open(path, mode)
-        self.reads = 0
-        self.writes = 0
+        self.reads = 0; self.writes = 0
         self._ensure_header()
 
     def _ensure_header(self):
@@ -76,9 +86,6 @@ class DataFile:
             magic, ver, rs, _ = _DATA_HDR.unpack(hdr)
             if magic != _DATA_MAGIC or ver != _DATA_VERSION or rs != self.record_size:
                 raise ValueError("Encabezado inválido en archivo de datos")
-
-    @property
-    def header_size(self): return _DATA_HDR.size
 
     def append(self, rec_bytes: bytes) -> int:
         self.f.seek(0, io.SEEK_END)
@@ -104,9 +111,7 @@ class DataFile:
 class IndexFile:
     def __init__(self, path: str, create: bool):
         self.path = path
-        mode = 'r+b'
-        if create or not os.path.exists(path):
-            mode = 'w+b'
+        mode = 'r+b' if os.path.exists(path) and not create else 'w+b'
         self.f = open(path, mode)
         self.reads = 0; self.writes = 0
         self._ensure_header()
@@ -115,8 +120,7 @@ class IndexFile:
         self.f.seek(0, io.SEEK_END)
         if self.f.tell() == 0:
             hdr = _INDEX_HDR.pack(_INDEX_MAGIC, _INDEX_VERSION, _NODE_SIZE, 0, 0)
-            self.f.seek(0); self.f.write(hdr); self.f.flush()
-            self.writes += 1
+            self.f.seek(0); self.f.write(hdr); self.f.flush(); self.writes += 1
         self._read_header()
 
     def _read_header(self):
@@ -210,15 +214,12 @@ def _insert(idx: IndexFile, off: int, key: int, value_off: int) -> int:
     k, h, l, r, v = idx.read_node(off)
     if key < k:
         new_l = _insert(idx, l, key, value_off)
-        k, h, _, r, v = idx.read_node(off)
         idx.write_node(off, k, h, new_l, r, v)
     elif key > k:
         new_r = _insert(idx, r, key, value_off)
-        k, h, l, _, v = idx.read_node(off)
         idx.write_node(off, k, h, l, new_r, v)
     else:
         new_r = _insert(idx, r, key, value_off)
-        k, h, l, _, v = idx.read_node(off)
         idx.write_node(off, k, h, l, new_r, v)
     return _rebalance(idx, off)
 
@@ -240,29 +241,30 @@ def _range(idx: IndexFile, off: int, lo: int, hi: int, out: List[int]):
     if k < hi: _range(idx, r, lo, hi, out)
 
 class AVLFile:
-    def __init__(self, data_path: str, index_path: str, create: bool = False):
-        self.codec = EmployeeCodec()
-        self.data = DataFile(data_path, self.codec.record_size(), create)
+    def __init__(self, schema: Schema, data_path: str, index_path: str, create: bool = False):
+        self.schema = schema
+        self.data = DataFile(data_path, schema.size, create)
         self.index = IndexFile(index_path, create)
+        self.key_field = schema.fields[0].name
 
     def add(self, row: Dict[str, Any]) -> None:
-        packed = self.codec.pack(row)
+        packed = self.schema.pack(row)
         data_off = self.data.append(packed)
-        key = self.codec.key_of(row)
+        key = int(row[self.key_field])
         new_root = _insert(self.index, self.index.root_off, key, data_off)
         self.index._write_header(root_off=new_root, count=self.index.count + 1)
 
     def search(self, key: int) -> List[Dict[str, Any]]:
         offs: List[int] = []
         _search(self.index, self.index.root_off, key, offs)
-        return [self.codec.unpack(self.data.read_at(off)) for off in offs]
+        return [self.schema.unpack(self.data.read_at(off)) for off in offs]
 
     def rangeSearch(self, lo: int, hi: int) -> List[Dict[str, Any]]:
         offs: List[int] = []
         _range(self.index, self.index.root_off, lo, hi, offs)
-        return [self.codec.unpack(self.data.read_at(off)) for off in offs]
+        return [self.schema.unpack(self.data.read_at(off)) for off in offs]
 
-    def io_stats(self) -> Dict[str, int]:
+    def io_stats(self):
         return {
             "data_reads": self.data.reads,
             "data_writes": self.data.writes,
