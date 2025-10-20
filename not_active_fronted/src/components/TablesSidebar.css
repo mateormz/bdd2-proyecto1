@@ -1,0 +1,34 @@
+.tables-sidebar-container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.tables-sidebar-header {
+  background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%) !important;
+}
+
+.table-list-item {
+  transition: background-color 0.2s ease !important;
+}
+
+.table-list-item:hover {
+  background-color: rgba(25, 118, 210, 0.08) !important;
+}
+
+.table-info-modal {
+  max-height: 90vh !important;
+  overflow-y: auto !important;
+}
+
+@media (max-width: 768px) {
+  .tables-sidebar-container {
+    width: 100% !important;
+    max-height: 300px !important;
+  }
+  
+  .table-info-modal {
+    width: 95vw !important;
+    max-height: 90vh !important;
+  }
+}
