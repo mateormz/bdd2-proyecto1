@@ -1,0 +1,24 @@
+.results-panel-container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.results-table-custom {
+  font-family: 'Roboto', 'Helvetica', 'Arial', sans-serif !important;
+}
+
+.results-table-custom .MuiTableCell-root {
+  font-size: 13px !important;
+}
+
+.results-table-custom .MuiTableHead-root {
+  background-color: #1976d2 !important;
+}
+
+@media (max-width: 768px) {
+  .results-table-custom .MuiTableCell-root {
+    font-size: 12px !important;
+    padding: 8px !important;
+  }
+}

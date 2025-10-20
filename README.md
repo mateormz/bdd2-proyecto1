@@ -31,16 +31,18 @@ bdd2-proyecto1/
 │       ├─ app.py                   # API principal con FastAPI
 │       ├─ catalog.py               # Catálogo dinámico de tablas/índices
 │       ├─ engine.py                # Query Engine + Optimizer básico
-│       ├─ index                    # Carpeta con los indices
+│       ├─ index                    # Carpeta con los índices
 │       │   ├─ bptree.py            # B+Tree
 │       │   ├─ ext_hash.py          # Extendible Hash
 │       │   ├─ isam.py              # ISAM
 │       │   ├─ rtree_adapter.py     # RTree
-│       │   └─ sequential.py        # Sequetial File o AVL File
-│       ├─ io_counters.py           # Métricas de I/O y tiempos│       
-│       ├─ parser_sql.py            # ParserSQL│        
+│       │   └─ avl.py               # AVL File
+│       ├─ io_counters.py           # Métricas de I/O y tiempos
+│       ├─ parser_sql.py            # ParserSQL
 │       ├─ routes.py                # Rutas de la API
-│       └─ utils.py                 # Helpers: carga de CSV, validaciones, etc.
+│       ├─ utils.py                 # Helpers: carga de CSV, validaciones, etc.
+│       └─ core                     # Núcleo: definición de esquemas y estructuras
+│           └─ schema.py            # Definición de esquemas de tablas/atributos
 ├─ compose.yml
 └─ frontend
     ├─ Dockerfile
