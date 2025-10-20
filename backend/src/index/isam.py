@@ -114,7 +114,7 @@ class IndexNode:
     def __init__(self, codec: KeyCodec, keys=None, pointers=None):
         self.codec = codec
         self.keys = list(keys) if keys is not None else []
-        self.pointers = list(pointers) if points is not None else []
+        self.pointers = list(pointers) if pointers is not None else []
 
     @property
     def HEADER_FORMAT(self): return '<i'
