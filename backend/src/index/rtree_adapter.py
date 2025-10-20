@@ -1,64 +1,11 @@
 from __future__ import annotations
-import os, math, pickle, time, struct, sys
+import os, math, pickle, struct, sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from rtree import index as rtree_index
+from src.core.schema import Schema,Kind
+from io_counters import count_read, count_write, start_timing, stop_timing, reset_counters, get_counters
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from core.schema import Schema, Kind
-
-reads = 0
-writes = 0
-read_bytes = 0
-write_bytes = 0
-start_time = None
-total_time_ms = 0.0
-
-def count_read(bytes_count=0):
-    global reads, read_bytes
-    reads += 1
-    read_bytes += bytes_count
-
-def count_write(bytes_count=0):
-    global writes, write_bytes
-    writes += 1
-    write_bytes += bytes_count
-
-def start_timing():
-    global start_time
-    start_time = time.time()
-
-def stop_timing():
-    global total_time_ms, start_time
-    if start_time:
-        total_time_ms = (time.time() - start_time) * 1000
-        start_time = None
-
-def reset_counters():
-    global reads, writes, read_bytes, write_bytes, total_time_ms, start_time
-    reads = writes = read_bytes = write_bytes = 0
-    total_time_ms = 0.0
-    start_time = None
-
-def show_report(title="Reporte I/O Global"):
-    total_ops = reads + writes
-    print(f"\n{title}")
-    print("="*40)
-    print(f"Lecturas: {reads}")
-    print(f"Escrituras: {writes}")
-    print(f"Total operaciones: {total_ops}")
-    print(f"Tiempo: {total_time_ms:.2f} ms")
-    if total_ops > 0:
-        print(f"Promedio: {total_time_ms/total_ops:.2f} ms/op")
-    print("="*40)
-
-def get_counters():
-    return {
-        'reads': reads,
-        'writes': writes,
-        'read_bytes': read_bytes,
-        'write_bytes': write_bytes,
-        'total_time_ms': total_time_ms
-    }
 
 def _to_float(v: Any) -> float:
     try: return float(v)
@@ -169,6 +116,7 @@ class RTreeAdapter:
             try:
                 self.idx.delete(int(_id), _bbox_from_point(pt))
                 removed += 1
+                count_write()
             except Exception: pass
             self.meta["id_to_payload"].pop(_id, None)
             try: self.meta["label_to_ids"][label_str].remove(_id)
@@ -184,7 +132,9 @@ class RTreeAdapter:
         out: List[Dict[str, Any]] = []
         for _id in self.meta["label_to_ids"].get(label_str, []):
             payload = self.meta["id_to_payload"].get(_id)
-            if payload: out.append(dict(payload["row"]))
+            if payload:
+                count_read()
+                out.append(dict(payload["row"]))
         return out
 
     def range(self, point: Sequence[float], radius: float) -> List[Dict[str, Any]]:
@@ -200,7 +150,7 @@ class RTreeAdapter:
         results: List[Tuple[float, Dict[str, Any]]] = []
         start_timing()
         for obj in self.idx.intersection(query_box, objects=True):
-            count_read(1)
+            count_read()
             _id = int(obj.id)
             payload = self.meta["id_to_payload"].get(_id)
             if not payload: continue
@@ -229,7 +179,7 @@ class RTreeAdapter:
         start_timing()
         try:
             for _id in self.idx.nearest(query_box, num_results=k):
-                count_read(1)
+                count_read()
                 _id = int(_id)
                 payload = self.meta["id_to_payload"].get(_id)
                 if not payload: continue
