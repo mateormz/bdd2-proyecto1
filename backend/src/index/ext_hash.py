@@ -3,15 +3,7 @@ import os, struct, sys
 from typing import Any, Dict, List, Optional
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from core.schema import Schema, Field, Kind
-
-class IOStats:
-    reads = 0
-    writes = 0
-    @classmethod
-    def reset(cls):
-        cls.reads = 0
-        cls.writes = 0
-IO = IOStats
+from io_counters import count_read, count_write
 
 DEFAULT_D = 8
 BLOCK_FACTOR = 32
@@ -41,7 +33,7 @@ class Bucket:
     def byte_size(self) -> int:
         return BLOCK_FACTOR * self.record_size + 4
     def pack(self) -> bytes:
-        IO.writes += 1
+        count_write()
         data = bytearray()
         for r in self.records[:BLOCK_FACTOR]:
             data += self.schema.pack(r)
@@ -54,7 +46,7 @@ class Bucket:
         return bytes(data)
     @staticmethod
     def unpack(buf: bytes, schema: Schema) -> "Bucket":
-        IO.reads += 1
+        count_read()
         rec_size = schema.size
         want = BLOCK_FACTOR * rec_size + 4
         if len(buf) < want:
@@ -115,7 +107,7 @@ class ExtendibleHashing:
         return BLOCK_FACTOR * self.schema.size + 4
 
     def _read_global_depth(self) -> int:
-        IO.reads += 1
+        count_read()
         try:
             with open(self.filename, "rb") as f:
                 b = f.read(4)
@@ -126,7 +118,7 @@ class ExtendibleHashing:
         return DEFAULT_D
 
     def _write_global_depth(self, D: int):
-        IO.writes += 1
+        count_write()
         with open(self.filename, "r+b") as f:
             f.seek(0)
             f.write(struct.pack("<i", D))
@@ -135,13 +127,13 @@ class ExtendibleHashing:
         return 4 + index * self._bucket_size()
 
     def _bucket_count_on_disk(self) -> int:
-        IO.reads += 1
+        count_read()
         size = os.path.getsize(self.filename)
         if size < 4: return 0
         return (size - 4) // self._bucket_size()
 
     def _init_file(self, D: int):
-        IO.writes += 1
+        count_write()
         self._D = D
         with open(self.filename, "wb") as f:
             f.write(struct.pack("<i", D))
@@ -160,7 +152,7 @@ class ExtendibleHashing:
         return h & ((1 << self._D) - 1)
 
     def _read_bucket(self, index: int) -> Bucket:
-        IO.reads += 1
+        count_read()
         with open(self.filename, "rb") as f:
             off = self._bucket_offset(index)
             f.seek(off)
@@ -168,14 +160,14 @@ class ExtendibleHashing:
         return Bucket.unpack(buf, self.schema)
 
     def _write_bucket(self, index: int, bucket: Bucket):
-        IO.writes += 1
+        count_write()
         with open(self.filename, "r+b") as f:
             off = self._bucket_offset(index)
             f.seek(off)
             f.write(bucket.pack())
 
     def _append_bucket(self, bucket: Bucket) -> int:
-        IO.writes += 1
+        count_write()
         with open(self.filename, "r+b") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
