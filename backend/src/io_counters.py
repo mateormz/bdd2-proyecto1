@@ -74,3 +74,24 @@ def get_counters():
         'write_bytes': _counter.write_bytes,
         'total_time_ms': _counter.total_time_ms
     }
+
+if __name__ == "__main__":
+    # Reiniciar contadores antes del test
+    reset_counters()
+    start_timing()
+
+    # Simular lecturas y escrituras
+    count_read(128)   # leímos 128 bytes
+    count_read(256)   # leímos 256 bytes
+    count_write(64)   # escribimos 64 bytes
+    count_write(512)  # escribimos 512 bytes
+
+    # Simular una pequeña espera para ver el tiempo
+    import time
+    time.sleep(0.05)  # 50 ms
+
+    stop_timing()
+
+    # Mostrar el reporte
+    show_report("Test de IOCounter")
+    print("Diccionario de métricas:", get_counters())

@@ -1,12 +1,20 @@
-// Simple cliente para tu FastAPI
 const BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api";
+
+export type IoMetrics = {
+  reads: number;
+  writes: number;
+  read_bytes: number;
+  write_bytes: number;
+  total_time_ms: number; // de tu IOCounter (0 si no usas start/stop)
+};
 
 export type SqlResponse = {
   status: "ok" | "error";
   rows?: any[];
   rows_affected?: number;
   message?: string;
-  _elapsed_ms?: number;
+  _elapsed_ms?: number;   // wall-clock que añadimos en routes
+  metrics?: IoMetrics;    // <-- NUEVO (opcional para compatibilidad)
 };
 
 export async function execSQL(query: string): Promise<SqlResponse> {
@@ -16,7 +24,7 @@ export async function execSQL(query: string): Promise<SqlResponse> {
     body: JSON.stringify({ query }),
   });
   if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
-  return res.json();
+  return res.json(); // incluirá metrics y _elapsed_ms si el backend los manda
 }
 
 export async function listTables(): Promise<{
@@ -35,6 +43,15 @@ export async function uploadCSV(file: File): Promise<{ status: string; path: str
   return res.json();
 }
 
+// El backend ahora también devuelve metrics/_elapsed_ms aquí:
+export type LoadCsvResponse = {
+  status?: "ok" | "error";
+  message?: string;
+  _elapsed_ms?: number;
+  metrics?: IoMetrics;
+  // otros campos que ya devuelva tu eng.execute(...)
+};
+
 export async function loadCSV(params: {
   table_name: string;
   csv_path: string;
@@ -43,7 +60,7 @@ export async function loadCSV(params: {
   x?: string;
   y?: string;
   z?: string | null;
-}): Promise<any> {
+}): Promise<LoadCsvResponse> {
   const res = await fetch(`${BASE}/load-csv`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -65,7 +82,7 @@ export async function spatialRange(params: {
     body: JSON.stringify(params),
   });
   if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
-  return res.json();
+  return res.json(); // ahora con metrics/_elapsed_ms
 }
 
 export async function spatialKNN(params: {
@@ -80,5 +97,5 @@ export async function spatialKNN(params: {
     body: JSON.stringify(params),
   });
   if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
-  return res.json();
+  return res.json(); // ahora con metrics/_elapsed_ms
 }

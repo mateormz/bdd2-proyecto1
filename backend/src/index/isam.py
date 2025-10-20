@@ -2,6 +2,7 @@ import struct, os, csv
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.core.schema import Schema, Field, Kind
+from src.io_counters import count_read, count_write
 
 def _project_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -11,7 +12,6 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 BLOCK_FACTOR = 50
 INDEX_BLOCK_FACTOR = 20
-
 
 class KeyCodec:
     def __init__(self, key_field: Field):
@@ -114,7 +114,7 @@ class IndexNode:
     def __init__(self, codec: KeyCodec, keys=None, pointers=None):
         self.codec = codec
         self.keys = list(keys) if keys is not None else []
-        self.pointers = list(pointers) if pointers is not None else []
+        self.pointers = list(pointers) if points is not None else []
 
     @property
     def HEADER_FORMAT(self): return '<i'
@@ -149,6 +149,7 @@ class IndexNode:
         node.keys = keys; node.pointers = pointers
         return node
 
+
 class ISAMFile:
 
     def __init__(self, filename, schema: Schema, key_field: str):
@@ -167,37 +168,49 @@ class ISAMFile:
 
         self.page_size = DataPage.HEADER_SIZE + BLOCK_FACTOR * schema.size
 
+    # ---------- LECTURAS (contadas) ----------
     def _read_root(self) -> IndexNode | None:
         if not os.path.exists(self.filename_idx2): return None
         with open(self.filename_idx2, 'rb') as f:
-            raw = f.read(IndexNode(self.codec).SIZE_OF_NODE)
+            size = IndexNode(self.codec).SIZE_OF_NODE
+            raw = f.read(size)
+            count_read(len(raw))
         return IndexNode.unpack(raw, self.codec)
 
     def _read_level1_node(self, node_idx: int) -> IndexNode:
         with open(self.filename_idx1, 'rb') as f:
-            f.seek(node_idx * IndexNode(self.codec).SIZE_OF_NODE)
-            raw = f.read(IndexNode(self.codec).SIZE_OF_NODE)
+            size = IndexNode(self.codec).SIZE_OF_NODE
+            f.seek(node_idx * size)
+            raw = f.read(size)
+            count_read(len(raw))
         return IndexNode.unpack(raw, self.codec)
 
     def _read_data_page(self, page_idx: int) -> DataPage:
         with open(self.filename, 'rb') as f:
             f.seek(page_idx * self.page_size)
             data = f.read(self.page_size)
+            count_read(len(data))
         return DataPage(self.schema).unpack(data)
 
+    # ---------- ESCRITURAS (contadas) ----------
     def _write_data_page(self, page_idx: int, page: DataPage):
         with open(self.filename, 'r+b') as f:
             f.seek(page_idx * self.page_size)
-            f.write(page.pack())
+            payload = page.pack()
+            n = f.write(payload)
+            count_write(n if isinstance(n, int) and n >= 0 else len(payload))
 
     def _append_overflow_page(self, page: DataPage) -> int:
         with open(self.filename, 'r+b') as f:
             f.seek(0, os.SEEK_END)
             pos = f.tell()
             new_idx = pos // self.page_size
-            f.write(page.pack())
+            payload = page.pack()
+            n = f.write(payload)
+            count_write(n if isinstance(n, int) and n >= 0 else len(payload))
         return new_idx
 
+    # ---------- CONSTRUCCIÓN ----------
     def build_from_csv(self, csv_path: str, delimiter: str = ','):
         rows = []
         with open(csv_path, 'r', newline='', encoding='utf-8') as fh:
@@ -206,32 +219,32 @@ class ISAMFile:
                 if not r:
                     continue
                 try:
-                    k = self.codec.norm(r[self.key_field])
-
+                    _ = self.codec.norm(r[self.key_field])
                     rec = {f.name: r.get(f.name, None) for f in self.schema.fields
                            if f.name != self.schema.deleted_name}
-
                     if self.schema.deleted_name:
                         rec[self.schema.deleted_name] = 0
-
                     rec = self.schema.coerce_row(rec)
-
                     rows.append(rec)
                 except Exception:
                     continue
 
         rows.sort(key=lambda rec: self.codec.norm(rec[self.key_field]))
 
+        # páginas de datos
         first_keys_level0 = []
         with open(self.filename, 'wb') as f:
             for start in range(0, len(rows), BLOCK_FACTOR):
                 chunk = rows[start:start + BLOCK_FACTOR]
                 page = DataPage(self.schema, chunk, next_overflow=-1)
-                f.write(page.pack())
+                payload = page.pack()
+                n = f.write(payload)
+                count_write(n if isinstance(n, int) and n >= 0 else len(payload))
                 first_keys_level0.append(self.codec.norm(chunk[0][self.key_field]))
 
         num_data_pages = len(first_keys_level0)
 
+        # nivel 1
         first_keys_level1 = []
         level1_nodes = []
         with open(self.filename_idx1, 'wb') as f:
@@ -242,17 +255,23 @@ class ISAMFile:
                 node_keys = chunk_keys[1:] if len(chunk_keys) > 1 else []
                 node_ptrs = list(range(i, end))
                 node = IndexNode(self.codec, keys=node_keys, pointers=node_ptrs)
-                f.write(node.pack())
+                payload = node.pack()
+                n = f.write(payload)
+                count_write(n if isinstance(n, int) and n >= 0 else len(payload))
                 first_keys_level1.append(chunk_keys[0])
                 level1_nodes.append(len(level1_nodes))
                 i = end
 
+        # root (nivel 2)
         root_keys = first_keys_level1[1:] if len(first_keys_level1) > 1 else []
         root_ptrs = level1_nodes
         root = IndexNode(self.codec, keys=root_keys, pointers=root_ptrs)
         with open(self.filename_idx2, 'wb') as f:
-            f.write(root.pack())
+            payload = root.pack()
+            n = f.write(payload)
+            count_write(n if isinstance(n, int) and n >= 0 else len(payload))
 
+    # ---------- NAVEGACIÓN / OPS ----------
     def _locate_data_page(self, key_value) -> int:
         k = self.codec.norm(key_value)
         root = self._read_root()
@@ -264,7 +283,6 @@ class ISAMFile:
                 node_idx = root.pointers[i]; break
         else:
             node_idx = root.pointers[len(root.keys)]
-
 
         node = self._read_level1_node(node_idx)
         page_idx = 0
@@ -388,6 +406,7 @@ class ISAMFile:
             page_idx = page.next_overflow
         return False
 
+    # ---------- SCAN / DEBUG ----------
     def scanAll(self):
         if not os.path.exists(self.filename):
             print("(archivo vacío)"); return
@@ -397,6 +416,7 @@ class ISAMFile:
             f.seek(0)
             for p in range(total_pages):
                 raw = f.read(self.page_size)
+                count_read(len(raw))
                 page = DataPage(self.schema).unpack(raw)
                 act = [r for r in page.records if r.get(self.schema.deleted_name, 0) == 0]
                 print(f"Page {p:3d} (overflow={page.next_overflow:3d}, size={len(page.records)}, activos={len(act)})")
@@ -417,5 +437,6 @@ class ISAMFile:
             f.seek(0)
             for i in range(n):
                 raw = f.read(node_size)
+                count_read(len(raw))
                 node = IndexNode.unpack(raw, self.codec)
                 print(f"Node {i}: keys={node.keys}, ptrs={node.pointers}")

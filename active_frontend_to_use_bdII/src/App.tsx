@@ -147,6 +147,9 @@ export default function App() {
     }
   }
 
+  // === NUEVO: referencia local a métricas de I/O ===
+  const m = (result as any)?.metrics;
+
   return (
     <div className="app">
       {/* SIDEBAR */}
@@ -304,6 +307,13 @@ export default function App() {
             <div className="kpi small">status: {result?.status ?? "-"}</div>
             <div className="kpi small">filas: {result?.rows ? result.rows.length : 0}</div>
             <div className="kpi small">tiempo: {fmtMs(result?._elapsed_ms)}</div>
+
+            {/* MÉTRICAS I/O */}
+            <div className="kpi small">reads: {m?.reads ?? 0}</div>
+            <div className="kpi small">writes: {m?.writes ?? 0}</div>
+            <div className="kpi small">read_bytes: {m?.read_bytes ?? 0}</div>
+            <div className="kpi small">write_bytes: {m?.write_bytes ?? 0}</div>
+            <div className="kpi small">io_time: {fmtMs(m?.total_time_ms)}</div>
           </div>
           <ResultTable rows={result?.rows} />
           {result?.message && (
