@@ -2,7 +2,7 @@ from __future__ import annotations
 import os, struct, sys
 from typing import Any, Dict, List, Optional
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from core.schema import Schema, Field, Kind
+from src.core.schema import Schema, Field, Kind
 
 class IOStats:
     reads = 0

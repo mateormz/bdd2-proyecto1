@@ -23,7 +23,7 @@ export default function App() {
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvUploadedPath, setCsvUploadedPath] = useState("");
   const [tableName, setTableName] = useState("Inventory3D");
-  const [indexType, setIndexType] = useState<"SEQUENTIAL" | "ISAM" | "EXTHASH" | "BPTREE" | "RTREE">("RTREE");
+  const [indexType, setIndexType] = useState<"SEQUENTIAL" | "ISAM" | "EXTHASH" | "BPTREE_CLUSTERED" | "RTREE">("RTREE");
   const [keyColumn, setKeyColumn] = useState("id");
   const [colX, setColX] = useState("x");
   const [colY, setColY] = useState("y");
@@ -228,7 +228,7 @@ export default function App() {
                   <option>SEQUENTIAL</option>
                   <option>ISAM</option>
                   <option>EXTHASH</option>
-                  <option>BPTREE</option>
+                  <option>BPTREE_CLUSTERED</option>
                   <option>RTREE</option>
                 </select>
               </div>

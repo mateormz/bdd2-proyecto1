@@ -5,8 +5,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Callable
 import os, struct, bisect, pickle, sys
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from core.schema import Schema, Kind
-from io_counters import count_read, count_write  
+from src.core.schema import Schema, Kind
+from src.io_counters import count_read, count_write  
 
 PAGE_SIZE   = 4096
 MAGIC       = b"BPTCFS1\0"
