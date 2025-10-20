@@ -1,11 +1,11 @@
 import struct
 import os
 import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'core'))
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+# sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'core'))
+# sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from schema import Schema, Field, Kind
-from io_counters import IOCounter, count_read, count_write
+from src.core.schema import Schema, Field, Kind
+from src.io_counters import IOCounter, count_read, count_write
 
 D = 2
 MAX_CHAINING = 1

@@ -1,5 +1,5 @@
 import struct, os, csv
-from core.schema import Schema, Field, Kind
+from src.core.schema import Schema, Field, Kind
 
 def _project_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

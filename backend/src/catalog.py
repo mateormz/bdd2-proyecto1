@@ -1,6 +1,6 @@
 # backend/src/catalog.py
 from typing import Dict, Any, Optional
-from parser_sql import IndexType
+from src.parser_sql import IndexType
 
 class Catalog:
     def __init__(self):

@@ -11,8 +11,8 @@ from typing import Any, Iterable, List, Optional, Tuple
 
 
 import sys, os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from core.schema import Schema, Field, Kind
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from src.core.schema import Schema, Field, Kind
 #from ..core.schema import Schema, Field, Kind
 #from core.schema import Schema, Field, Kind
 

@@ -3,16 +3,16 @@ from typing import Any, Dict, List, Optional, Tuple
 import os
 import csv
 
-from parser_sql import (
+from src.parser_sql import (
     parse_sql, CreateTableStatement, SelectStatement, InsertStatement, DeleteStatement,
     IndexType, DataType, Column
 )
-from catalog import Catalog
-from core.schema import Schema, Field, Kind
-from index.bptree import ClusteredIndexFile
-from index.isam import ISAMFile
-from index.ext_hash import ExtendibleHashing
-from index.rtree_adapter import RTreeAdapter
+from src.catalog import Catalog
+from src.core.schema import Schema, Field, Kind
+from src.index.bptree import ClusteredIndexFile
+from src.index.isam import ISAMFile
+from src.index.ext_hash import ExtendibleHashing
+from src.index.rtree_adapter import RTreeAdapter
 
 
 class Engine:
