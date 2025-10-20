@@ -3,16 +3,17 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
-# Tipos de índices
+
 class IndexType(Enum):
     SEQUENTIAL = "SEQ"
     AVLTREE = "AVL"
     ISAM = "ISAM"
     BTREE = "BTree"
+    BPTREE_CLUSTERED = "BPTreeClustered"
     EXTENDIBLE_HASH = "ExtHash"
     RTREE = "RTree"
 
-# Tipos de datos
+
 class DataType(Enum):
     INT = "INT"
     FLOAT = "FLOAT"
@@ -20,7 +21,7 @@ class DataType(Enum):
     DATE = "DATE"
     ARRAY = "ARRAY"
 
-# Columna de la tabla (atributo)
+
 @dataclass
 class Column:
     name: str
@@ -32,7 +33,6 @@ class Column:
     array_type: Optional[DataType] = None
 
 
-# Statements
 @dataclass
 class CreateTableStatement:
     table_name: str
@@ -40,30 +40,31 @@ class CreateTableStatement:
     from_file: Optional[str] = None
     using_index: Optional[Tuple[IndexType, str]] = None
 
+
 @dataclass
 class SelectStatement:
     table_name: str
-    columns: List[str]              # ['*'] para select all
+    columns: List[str]
     where_clause: Optional[Dict[str, Any]] = None
     spatial_query: Optional[Dict[str, Any]] = None
+
 
 @dataclass
 class InsertStatement:
     table_name: str
     values: List[Any]
 
+
 @dataclass
 class DeleteStatement:
     table_name: str
     where_clause: Dict[str, Any]
 
+
 class SQLParserError(Exception):
     pass
 
-# Update
-# Transaction
 
-# Parser
 class ParserSQL:
     def __init__(self):
         self.tokens: List[str] = []
@@ -88,13 +89,12 @@ class ParserSQL:
             return self._parse_delete()
         else:
             raise SQLParserError(f"Comando no soportado: {command}")
-    
-    # Quita comentarios y espacios extra
+
     def _normalize_query(self, query: str) -> str:
-        query = re.sub(r'--.*', '', query) # "-- Comentario"
-        query = re.sub(r'/\*.*?\*/', '', query, flags=re.DOTALL) # "/* Comentario */"
+        query = re.sub(r'--.*', '', query)
+        query = re.sub(r'/\*.*?\*/', '', query, flags=re.DOTALL)
         return ' '.join(query.split()).strip()
-    
+
     def _tokenize(self, query: str) -> List[str]:
         pattern = r'''
             "([^"]*)"                    |  # strings dobles
@@ -110,8 +110,7 @@ class ParserSQL:
         for m in re.finditer(pattern, query, re.VERBOSE):
             tokens.append(m.group(0))
         return tokens
-    
-    # Cursor
+
     def _current_token(self) -> str:
         return "" if self.current_token >= len(self.tokens) else self.tokens[self.current_token]
 
@@ -129,9 +128,9 @@ class ParserSQL:
         if tok.upper() != expected.upper():
             raise SQLParserError(f"Se esperaba '{expected}', se encontró '{tok}'")
         return tok
-    
+
     def _parse_create_table(self):
-        self._consume_token()        # CREATE
+        self._consume_token()
         self._expect_token("TABLE")
         table_name = self._consume_token()
 
@@ -139,7 +138,7 @@ class ParserSQL:
             return self._parse_create_from_file(table_name)
         else:
             return self._parse_create_with_schema(table_name)
-        
+
     def _parse_create_with_schema(self, table_name: str):
         self._expect_token("(")
         columns: List[Column] = []
@@ -179,44 +178,94 @@ class ParserSQL:
 
         is_key = False
         index_type: Optional[IndexType] = None
+
+        index_map = {
+            # Sequential
+            "SEQ": IndexType.SEQUENTIAL,
+            "SEQUENTIAL": IndexType.SEQUENTIAL,
+            "SEQUENTIAL_ORDERED": IndexType.SEQUENTIAL,
+            "SEQUENTIAL_ORDERED_FILE": IndexType.SEQUENTIAL,
+            # AVL
+            "AVL": IndexType.AVLTREE,
+            "AVLTREE": IndexType.AVLTREE,
+            # ISAM
+            "ISAM": IndexType.ISAM,
+            # B-Tree
+            "BTREE": IndexType.BTREE,
+            "BPTREE": IndexType.BTREE,
+            "B+TREE": IndexType.BTREE,
+            # B+Tree Clustered
+            "BPTREE_CLUSTERED": IndexType.BPTREE_CLUSTERED,
+            "B+TREE_CLUSTERED": IndexType.BPTREE_CLUSTERED,
+            "BPTREECLUSTERED": IndexType.BPTREE_CLUSTERED,
+            "B+TREE_CLUSTER": IndexType.BPTREE_CLUSTERED,
+            "B+TREEFILE": IndexType.BPTREE_CLUSTERED,
+            # Extensible Hash
+            "EXTHASH": IndexType.EXTENDIBLE_HASH,
+            "EXTENDIBLE_HASH": IndexType.EXTENDIBLE_HASH,
+            "EXT_HASH": IndexType.EXTENDIBLE_HASH,
+            # R-Tree
+            "RTREE": IndexType.RTREE,
+            "RTREEE": IndexType.RTREE,  # tolerancia a typo común
+            "RTREE_INDEX": IndexType.RTREE,
+            "RTREEFILE": IndexType.RTREE,
+            "RTREE_FILE": IndexType.RTREE,
+        }
+
         while self.current_token < len(self.tokens) and self._current_token() not in [",", ")"]:
             modifier = self._consume_token().upper()
             if modifier == "KEY":
                 is_key = True
             elif modifier == "INDEX":
-                index_name = self._consume_token().upper()
-                index_map = {
-                    "SEQ": IndexType.SEQUENTIAL, "AVL": IndexType.AVLTREE,
-                    "ISAM": IndexType.ISAM, "BTREE": IndexType.BTREE,
-                    "EXTHASH": IndexType.EXTENDIBLE_HASH, "RTREE": IndexType.RTREE
-                }
-                index_type = index_map.get(index_name)
+                idx_name = self._consume_token().upper()
+                index_type = index_map.get(idx_name)
                 if not index_type:
-                    raise SQLParserError(f"Tipo de índice no soportado: {index_name}")
+                    raise SQLParserError(f"Tipo de índice no soportado: {idx_name}")
 
         return Column(name, data_type, size, is_key, index_type, is_array, array_type)
-    
+
     def _parse_create_from_file(self, table_name: str):
         self._expect_token("FROM")
         self._expect_token("FILE")
-        file_path = self._consume_token().strip('"\'')  # permite comillas
+        file_path = self._consume_token().strip('"\'')
 
         using_index = None
         if self._current_token().upper() == "USING":
             self._consume_token()
             self._expect_token("INDEX")
-            index_name = self._consume_token().upper()
+            idx_name = self._consume_token().upper()
             self._expect_token("(")
             column_name = self._consume_token().strip('"\'')
             self._expect_token(")")
+
             index_map = {
-                "ISAM": IndexType.ISAM, "SEQ": IndexType.SEQUENTIAL,
-                "BTREE": IndexType.BTREE, "EXTHASH": IndexType.EXTENDIBLE_HASH,
-                "RTREE": IndexType.RTREE
+                # Sequential
+                "SEQ": IndexType.SEQUENTIAL,
+                "SEQUENTIAL": IndexType.SEQUENTIAL,
+                "SEQUENTIAL_ORDERED": IndexType.SEQUENTIAL,
+                "SEQUENTIAL_ORDERED_FILE": IndexType.SEQUENTIAL,
+                # ISAM
+                "ISAM": IndexType.ISAM,
+                # B-Tree
+                "BTREE": IndexType.BTREE,
+                "BPTREE": IndexType.BTREE,
+                "B+TREE": IndexType.BTREE,
+                # B+Tree Clustered
+                "BPTREE_CLUSTERED": IndexType.BPTREE_CLUSTERED,
+                "B+TREE_CLUSTERED": IndexType.BPTREE_CLUSTERED,
+                "BPTREECLUSTERED": IndexType.BPTREE_CLUSTERED,
+                "B+TREE_CLUSTER": IndexType.BPTREE_CLUSTERED,
+                "B+TREEFILE": IndexType.BPTREE_CLUSTERED,
+                # Extensible Hash
+                "EXTHASH": IndexType.EXTENDIBLE_HASH,
+                "EXTENDIBLE_HASH": IndexType.EXTENDIBLE_HASH,
+                "EXT_HASH": IndexType.EXTENDIBLE_HASH,
+                # R-Tree
+                "RTREE": IndexType.RTREE,
             }
-            index_type = index_map.get(index_name)
+            index_type = index_map.get(idx_name)
             if not index_type:
-                raise SQLParserError(f"Tipo de índice no soportado: {index_name}")
+                raise SQLParserError(f"Tipo de índice no soportado: {idx_name}")
             using_index = (index_type, column_name)
 
         return CreateTableStatement(table_name, [], file_path, using_index)
@@ -231,8 +280,10 @@ class ParserSQL:
         else:
             while True:
                 columns.append(self._consume_token())
-                if self._current_token() == ",": self._consume_token()
-                else: break
+                if self._current_token() == ",":
+                    self._consume_token()
+                else:
+                    break
 
         self._expect_token("FROM")
         table_name = self._consume_token()
@@ -244,7 +295,7 @@ class ParserSQL:
             where_clause, spatial_query = self._parse_where_clause()
 
         return SelectStatement(table_name, columns, where_clause, spatial_query)
-    
+
     def _parse_where_clause(self):
         column = self._consume_token()
         operator = self._consume_token()
@@ -270,20 +321,39 @@ class ParserSQL:
         payload = self._parse_value()
         self._expect_token(")")
 
+        # Rango espacial (point, [...])
         if head.lower() == "point":
-            if not (isinstance(payload, list) and (2 <= len(payload) <= 3)):
-                raise SQLParserError("Esperaba [lon, lat] o [lon, lat, radio]")
-            point = payload[:2]
-            radio = payload[2] if len(payload) == 3 else None
+            if not isinstance(payload, list):
+                raise SQLParserError("Esperaba lista para el punto: [x, y], [x, y, r] o [x, y, z, r]")
+
+            n = len(payload)
+            if n == 2:
+                point = payload
+                radio = None
+            elif n == 3:
+                point = payload[:2]
+                radio = payload[2]
+            elif n == 4:
+                # 3D con radio (x, y, z, r)
+                point = payload[:3]
+                radio = payload[3]
+            else:
+                raise SQLParserError("Formato inválido: usa [x,y], [x,y,r] o [x,y,z,r]")
+
             return {"type": "spatial_range", "column": column, "point": point, "radio": radio}
-        else:
+
+        try:
             k = int(head)
-            if not (isinstance(payload, list) and len(payload) == 2):
-                raise SQLParserError("Esperaba [lon, lat] para k-NN")
-            return {"type": "spatial_knn", "column": column, "point": payload, "k": k}
-        
+        except ValueError:
+            raise SQLParserError("k inválido para consulta k-NN")
+
+        if not (isinstance(payload, list) and (len(payload) == 2 or len(payload) == 3)):
+            raise SQLParserError("Esperaba [x, y] (2D) o [x, y, z] (3D) para k-NN")
+
+        return {"type": "spatial_knn", "column": column, "point": payload, "k": k}
+
     def _parse_delete(self):
-        self._consume_token()      # DELETE
+        self._consume_token()  # DELETE
         self._expect_token("FROM")
         table_name = self._consume_token()
         self._expect_token("WHERE")
@@ -293,7 +363,7 @@ class ParserSQL:
         return DeleteStatement(table_name, where_clause)
 
     def _parse_insert(self):
-        self._consume_token()      # INSERT
+        self._consume_token()  # INSERT
         self._expect_token("INTO")
         table_name = self._consume_token()
         self._expect_token("VALUES")
@@ -302,13 +372,14 @@ class ParserSQL:
         values: List[Any] = []
         while self._current_token() != ")":
             values.append(self._parse_value())
-            if self._current_token() == ",": self._consume_token()
+            if self._current_token() == ",":
+                self._consume_token()
             elif self._current_token() != ")":
                 raise SQLParserError("Se esperaba ',' o ')' en VALUES")
 
         self._expect_token(")")
         return InsertStatement(table_name, values)
-        
+
     def _parse_value(self):
         tok = self._consume_token()
 
@@ -326,11 +397,11 @@ class ParserSQL:
             vals = []
             while self._current_token() != "]":
                 vals.append(self._parse_value())
-                if self._current_token() == ",": self._consume_token()
+                if self._current_token() == ",":
+                    self._consume_token()
             self._expect_token("]")
             return vals
-
-        return tok  # identificador o string sin comillas
+        return tok
 
     def validate_statement(self, statement) -> bool:
         if isinstance(statement, CreateTableStatement):
@@ -340,38 +411,42 @@ class ParserSQL:
         elif isinstance(statement, (SelectStatement, InsertStatement, DeleteStatement)):
             return True
         return False
-    
+
+
 def parse_sql(query: str):
     parser = ParserSQL()
     stmt = parser.parse(query)
     parser.validate_statement(stmt)
     return stmt
 
+
 if __name__ == "__main__":
     tests = [
-        # CREATE con esquema
-        """CREATE TABLE Restaurantes (
-            id INT KEY INDEX SEQ,
-            nombre VARCHAR[20] INDEX BTree,
-            fechaRegistro DATE,
-            ubicacion ARRAY[FLOAT] INDEX RTree
+        """CREATE TABLE Inventario3D (
+            id INT KEY INDEX SEQUENTIAL,
+            x FLOAT INDEX RTree,
+            y FLOAT,
+            z FLOAT,
+            nombre VARCHAR[32]
         )""",
-        # CREATE desde archivo
-        """create table Restaurantes from file "C:\\restaurantes.csv" using index isam("id")""",
-        # SELECT *
-        "select * from Restaurantes",
+
+        "select * from Inventario3D",
         # SELECT =
-        "select * from Restaurantes where id = 123",
+        "select * from Inventario3D where id = 123",
         # SELECT between
-        "select * from Restaurantes where nombre between 'A' and 'Z'",
+        "select * from Inventario3D where nombre between 'A' and 'Z'",
         # INSERT
-        "insert into Restaurantes values (1, 'Pizza Hut', '2023-01-01', [12.5, -77.0])",
-        # DELETE
-        "delete from Restaurantes where id = 123",
-        # SELECT espacial
-        "select * from Restaurantes where ubicacion in (point, [12.5, -77.0, 3.5])",
-        # k-NN espacial
-        "select * from Restaurantes where ubicacion in (5, [12.5, -77.0])",
+        "insert into Inventario3D values (1, 10.0, 20.0, 5.0, 'Caja A')",
+        # Rango 2D sin radio
+        "select * from Inventario3D where x in (point, [10.0, 20.0])",
+        # Rango 2D con radio
+        "select * from Inventario3D where x in (point, [10.0, 20.0, 3.5])",
+        # Rango 3D con radio
+        "select * from Inventario3D where x in (point, [10.0, 20.0, 5.0, 2.0])",
+        # k-NN 2D
+        "select * from Inventario3D where x in (5, [10.0, 20.0])",
+        # k-NN 3D
+        "select * from Inventario3D where x in (3, [10.0, 20.0, 5.0])",
     ]
     for i, q in enumerate(tests, 1):
         try:

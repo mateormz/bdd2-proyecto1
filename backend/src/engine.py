@@ -1,391 +1,514 @@
-# backend/src/engine.py
-from typing import Any, Dict, List, Optional, Tuple
-import os
-import csv
+from __future__ import annotations
+import os, csv
+from typing import Any, Dict, List, Iterable, Optional, Tuple
+from dataclasses import dataclass
 
-from src.parser_sql import (
-    parse_sql, CreateTableStatement, SelectStatement, InsertStatement, DeleteStatement,
-    IndexType, DataType, Column
+from core.schema import Schema, Field, Kind
+from parser_sql import (
+    ParserSQL, CreateTableStatement, SelectStatement,
+    InsertStatement, DeleteStatement, IndexType, DataType, Column
 )
-from src.catalog import Catalog
-from src.core.schema import Schema, Field, Kind
-from src.index.bptree import ClusteredIndexFile
-from src.index.isam import ISAMFile
-from src.index.ext_hash import ExtendibleHashing
-from src.index.rtree_adapter import RTreeAdapter
+from catalog import Catalog
+
+from index.isam import ISAMFile
+from index.sequential import SequentialOrderedFile
+from index.ext_hash import ExtendibleHashing
+from index.rtree_adapter import RTreeAdapter
+from index.bptree import BPlusClusteredFile
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+OUT_DIR = os.path.join(ROOT, "out")
+os.makedirs(OUT_DIR, exist_ok=True)
 
 
-class Engine:
-    def __init__(self, catalog: Catalog):
-        self.catalog = catalog
-        self.rtree = RTreeAdapter()
+def _schema_from_columns(cols: List[Column]) -> Schema:
+    fields: List[Field] = []
+    for c in cols:
+        if c.data_type == DataType.INT:
+            fields.append(Field(c.name, Kind.INT, fmt="i"))
+        elif c.data_type == DataType.FLOAT:
+            fields.append(Field(c.name, Kind.FLOAT, fmt="f"))
+        elif c.data_type == DataType.VARCHAR:
+            if c.size is None or int(c.size) <= 0:
+                raise ValueError(f"VARCHAR de la columna '{c.name}' requiere tamaño positivo.")
+            fields.append(Field(c.name, Kind.CHAR, size=int(c.size)))
+        elif c.data_type == DataType.DATE:
+            fields.append(Field(c.name, Kind.DATE))
+        elif c.data_type == DataType.ARRAY:
+            raise ValueError("ARRAY requiere una representación fija. Usa VARCHAR[n] con tu formato serializado.")
+    return Schema(fields)
 
-    def execute(self, sql: str) -> Dict[str, Any]:
-        stmt = parse_sql(sql)
-        if isinstance(stmt, SelectStatement):
-            return self._exec_select(stmt)
-        elif isinstance(stmt, InsertStatement):
-            return self._exec_insert(stmt)
-        elif isinstance(stmt, DeleteStatement):
-            return self._exec_delete(stmt)
-        elif isinstance(stmt, CreateTableStatement):
-            return self._exec_create(stmt)
-        else:
-            raise ValueError("Statement no soportado")
+def _load_csv_rows(path: str) -> List[Dict[str, Any]]:
+    with open(path, newline="", encoding="utf-8") as f:
+        rdr = csv.DictReader(f)
+        return list(rdr)
 
-    # ---------------- SELECT ----------------
-    def _exec_select(self, stmt: SelectStatement) -> Dict[str, Any]:
-        tinfo = self.catalog.get_table(stmt.table_name)
-        if not tinfo:
-            raise ValueError(f"Tabla {stmt.table_name} no registrada")
-        schema: Schema = tinfo["schema"]
-        data_path: str = tinfo["data_path"]
-        indexes: Dict[str, Dict[str, Any]] = tinfo.get("indexes", {})
+def _coerce_to_schema(schema: Schema, row: Dict[str, Any]) -> Dict[str, Any]:
+    return schema.coerce_row(row)
 
-        if stmt.spatial_query:
-            rows = self._run_spatial(stmt, data_path, schema, indexes)
-            rows = self._project_columns(rows, stmt.columns)
-            return {"rows": rows, "metrics": {}}
+def _ensure_isam_storage_schema(user_schema: Schema) -> Schema:
+    if any(f.name == user_schema.deleted_name for f in user_schema.fields):
+        return user_schema
+    new_fields = list(user_schema.fields) + [Field(user_schema.deleted_name, Kind.INT, fmt="B")]
+    return Schema(new_fields, deleted_name=user_schema.deleted_name)
 
-        plan = self._choose_plan(stmt, indexes)
-        rows = self._run_plan(plan, stmt, data_path, schema, indexes)
-        rows = self._project_columns(rows, stmt.columns)
-        return {"rows": rows, "metrics": {}}
 
-    def _project_columns(self, rows: List[Dict[str, Any]], cols: List[str]) -> List[Dict[str, Any]]:
-        if cols == ["*"]:
-            return rows
-        return [{c: r.get(c) for c in cols} for r in rows]
+class BaseAdapter:
+    def build_from_csv(self, csv_path: str): ...
+    def search(self, key: Any) -> List[Dict[str, Any]]: ...
+    def range_search(self, a: Any, b: Any) -> Iterable[Dict[str, Any]]: ...
+    def add(self, rec: Dict[str, Any]): ...
+    def remove(self, key: Any) -> int: ...
 
-    def _choose_plan(self, stmt: SelectStatement, indexes: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-        wc = stmt.where_clause
-        if not wc:
-            return {"kind": "seq"}
-        if wc["type"] == "equality":
-            col = wc["column"]
-            op = wc["operator"]
-            if op not in ("=", "=="):
-                return self._plan_range(col)
-            if self._has_index(indexes, col, "exthash"):
-                return {"kind": "exthash", "col": col}
-            if self._has_index(indexes, col, "bptree"):
-                return {"kind": "bptree", "col": col}
-            if self._has_index(indexes, col, "isam"):
-                return {"kind": "isam", "col": col}
-            return {"kind": "seq", "col": col}
-        if wc["type"] in ("range", "cmp", "like"):
-            col = wc["column"]
-            return self._plan_range(col)
-        return {"kind": "seq"}
 
-    def _plan_range(self, col: str) -> Dict[str, Any]:
-        return {"kind": "range", "col": col}
+class ISAMAdapter(BaseAdapter):
+    def __init__(self, base_name: str, schema: Schema, key_field: str):
+        self.schema = schema; self.key = key_field
+        base = os.path.join(OUT_DIR, f"{base_name}.dat")
+        self.idx = ISAMFile(base, schema, key_field)
 
-    def _has_index(self, indexes, col, idx_kind_name: str) -> bool:
-        return self._get_index_meta(indexes, col, idx_kind_name.lower()) is not None
+    def build_from_csv(self, csv_path: str):
+        self.idx.build_from_csv(csv_path, delimiter=",")
 
-    def _run_plan(self, plan, stmt, data_path, schema, indexes):
-        wc = stmt.where_clause
-        if plan["kind"] == "seq":
-            raise NotImplementedError("Consulta requiere full scan, pero el lector secuencial aún no está implementado.")
+    def search(self, key: Any) -> List[Dict[str, Any]]:
+        r = self.idx.search(key)
+        return [r] if r else []
 
-        if plan["kind"] == "exthash":
-            idx_meta = self._get_index_meta(indexes, plan["col"], "exthash")
-            if not idx_meta:
-                return []
-            eh = ExtendibleHashing(idx_meta["path"], schema, plan["col"])
-            key = wc["value"]
-            rec = eh.search(key)
-            return [rec] if rec else []
+    def range_search(self, a: Any, b: Any) -> Iterable[Dict[str, Any]]:
+        return self.idx.rangeSearch(a, b)
 
-        if plan["kind"] == "bptree":
-            idx_meta = self._get_index_meta(indexes, plan["col"], "bptree")
-            if not idx_meta:
-                return []
-            bpt = ClusteredIndexFile.load(data_path, idx_meta["path"], schema)
-            key = wc["value"]
-            return bpt.search(key)
+    def add(self, rec: Dict[str, Any]):
+        self.idx.insert(_coerce_to_schema(self.schema, rec))
 
-        if plan["kind"] == "isam":
-            idx_meta = self._get_index_meta(indexes, plan["col"], "isam")
-            if not idx_meta:
-                return []
-            isam = ISAMFile(idx_meta["path"], schema, plan["col"])
-            key = int(wc["value"]) if self._is_int(schema, plan["col"]) else wc["value"]
-            rec = isam.search(key)
-            return [rec] if rec else []
+    def remove(self, key: Any) -> int:
+        return 1 if self.idx.delete(key) else 0
 
-        if plan["kind"] == "range":
-            col = plan["col"]
-            lo, hi = self._extract_range_bounds(wc, schema, col)
-            if self._has_index(indexes, col, "bptree"):
-                idx_meta = self._get_index_meta(indexes, col, "bptree")
-                bpt = ClusteredIndexFile.load(data_path, idx_meta["path"], schema)
-                return bpt.range_search(lo, hi)
-            if self._has_index(indexes, col, "isam"):
-                idx_meta = self._get_index_meta(indexes, col, "isam")
-                isam = ISAMFile(idx_meta["path"], schema, col)
-                lo_i = int(lo) if self._is_int(schema, col) else lo
-                hi_i = int(hi) if self._is_int(schema, col) else hi
-                return isam.rangeSearch(lo_i, hi_i)
-            raise NotImplementedError("Rango sin índice (B+Tree/ISAM) requiere scan secuencial, aún no implementado.")
+    def scan(self, limit: int = 200) -> List[Dict[str, Any]]:
+        out = []
+        with open(self.idx.filename, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            total_size = f.tell()
+        total_pages = total_size // self.idx.page_size
 
-        raise ValueError("Plan desconocido")
+        for pidx in range(total_pages):
+            page = self.idx._read_data_page(pidx)
+            for rec in page.records:
+                if rec.get(self.schema.deleted_name, 0) == 0:
+                    out.append(rec)
+                    if len(out) >= limit: return out
+            nxt = page.next_overflow
+            while nxt != -1:
+                page = self.idx._read_data_page(nxt)
+                for rec in page.records:
+                    if rec.get(self.schema.deleted_name, 0) == 0:
+                        out.append(rec)
+                        if len(out) >= limit: return out
+                nxt = page.next_overflow
+        return out
 
-    def _run_spatial(self, stmt: SelectStatement, data_path: str,
-                     schema: Schema, indexes: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
-        q = stmt.spatial_query
-        if q["type"] == "spatial_range":
-            point = q["point"]; radio = q["radio"]
-            return self.rtree.rangeSearch(tuple(point), radio)
-        if q["type"] == "spatial_knn":
-            point = q["point"]; k = q["k"]
-            return self.rtree.kNN(tuple(point), k)
-        return []
+class SequentialAdapter(BaseAdapter):
+    def __init__(self, base_name: str, schema: Schema, key_field: str):
+        self.schema = schema; self.key = key_field
+        self.seq = SequentialOrderedFile(os.path.join(OUT_DIR, base_name), schema, key_field)
 
-    # ---------------- CREATE ----------------
-    def _exec_create(self, stmt: CreateTableStatement) -> Dict[str, Any]:
-        repo = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        out_dir = os.path.join(repo, "out")
-        os.makedirs(out_dir, exist_ok=True)
+    def build_from_csv(self, csv_path: str):
+        rows = [_coerce_to_schema(self.schema, r) for r in _load_csv_rows(csv_path)]
+        self.seq.bulk_load(rows)
 
-        # CREATE TABLE ... FROM FILE "..." USING INDEX <TYPE>(col)
-        if stmt.from_file:
-            table = stmt.table_name
-            tinfo = self.catalog.get_table(table)
-            if not tinfo:
-                raise ValueError("Schema no registrado para la tabla. Regístralo en el Catálogo antes del CREATE FROM FILE.")
-            schema: Schema = tinfo["schema"]
-            data_path = tinfo["data_path"] or os.path.join(out_dir, f"{table}.dat")
+    def search(self, key: Any) -> List[Dict[str, Any]]:
+        return self.seq.search(key)
 
-            idx_type, col = stmt.using_index
+    def range_search(self, a: Any, b: Any) -> Iterable[Dict[str, Any]]:
+        lo, hi = (a, b) if a <= b else (b, a)
+        return self.seq.range_search(lo, hi)
 
-            if idx_type == IndexType.ISAM:
-                schema = self._schema_with_deleted(schema)
+    def add(self, rec: Dict[str, Any]):
+        self.seq.add(_coerce_to_schema(self.schema, rec))
 
-            if idx_type == IndexType.BTREE:
-                idx_path = os.path.join(out_dir, f"{table}_bptree.idx")
-                c = ClusteredIndexFile(data_path, idx_path, schema, col, self._infer_kind(schema, col))
-                c.build_from_csv(stmt.from_file)
-                self.catalog.register_table(table, schema, data_path)
-                self.catalog.register_index(table, col, IndexType.BTREE, idx_path)
+    def remove(self, key: Any) -> int:
+        return self.seq.remove(key)
 
-            elif idx_type == IndexType.ISAM:
-                idx_path = os.path.join(out_dir, f"{table}_isam.dat")
-                isam = ISAMFile(idx_path, schema, col)
-                isam.build_from_csv(stmt.from_file)
-                self.catalog.register_table(table, schema, data_path)  # guarda schema ya extendido
-                self.catalog.register_index(table, col, IndexType.ISAM, idx_path)
-
-            elif idx_type == IndexType.EXTENDIBLE_HASH:
-                idx_path = os.path.join(out_dir, f"{table}_exthash.dat")
-                eh = ExtendibleHashing(idx_path, schema, key_field=col)
-                with open(stmt.from_file, newline='', encoding="utf-8") as f:
-                    r = csv.DictReader(f)
-                    for row in r:
-                        # si el schema ya tiene deleted, inicialízalo en 0
-                        if any(fld.name == "deleted" for fld in schema.fields) and "deleted" not in row:
-                            row["deleted"] = 0
-                        eh.insert(row)
-                self.catalog.register_table(table, schema, data_path)
-                self.catalog.register_index(table, col, IndexType.EXTENDIBLE_HASH, idx_path)
-
-            else:
-                raise ValueError(f"Índice no soportado en CREATE FROM FILE: {idx_type}")
-
-            return {"ok": True, "action": "create_from_file", "table": table}
-
-        # CREATE TABLE ... (schema)
-        table = stmt.table_name
-        schema = self._build_schema_from_columns(stmt.columns)
-
-        if any(c.index_type == IndexType.ISAM for c in stmt.columns if c.is_key or c.index_type):
-            schema = self._schema_with_deleted(schema)
-
-        data_path = os.path.join(out_dir, f"{table}.dat")
-        self.catalog.register_table(table, schema, data_path)
-
-        # Inicializa índices vacíos si se declararon
-        for col in stmt.columns:
-            if col.index_type == IndexType.BTREE:
-                idx_path = os.path.join(out_dir, f"{table}_{col.name}_bptree.idx")
-                c = ClusteredIndexFile(data_path, idx_path, schema, col.name, self._infer_kind(schema, col.name))
-                if not os.path.exists(data_path):
-                    open(data_path, "ab").close()
-                c._rebuild_index()
-                self.catalog.register_index(table, col.name, IndexType.BTREE, idx_path)
-
-            elif col.index_type == IndexType.EXTENDIBLE_HASH:
-                idx_path = os.path.join(out_dir, f"{table}_{col.name}_exthash.dat")
-                ExtendibleHashing(idx_path, schema, key_field=col.name)
-                self.catalog.register_index(table, col.name, IndexType.EXTENDIBLE_HASH, idx_path)
-
-            elif col.index_type == IndexType.ISAM:
-                # ISAM vacío no se construye aquí (se hará con FROM FILE o con inserts/operaciones)
-                pass
-
-        return {"ok": True, "action": "create_schema", "table": table}
-
-    # ---------------- INSERT ----------------
-    def _exec_insert(self, stmt: InsertStatement) -> Dict[str, Any]:
-        tinfo = self.catalog.get_table(stmt.table_name)
-        if not tinfo:
-            raise ValueError(f"Tabla {stmt.table_name} no registrada")
-        schema: Schema = tinfo["schema"]
-        data_path: str = tinfo["data_path"]
-        indexes = tinfo.get("indexes", {})
-
-        row: Dict[str, Any] = {}
-        for f, v in zip(schema.fields, stmt.values):
-            row[f.name] = v
-
-        if any(fld.name == "deleted" for fld in schema.fields) and row.get("deleted") is None:
-            row["deleted"] = 0
-
-        # ExtHash (si existe)
-        for colname in indexes.keys():
-            meta = self._get_index_meta(indexes, colname, "exthash")
-            if meta:
-                eh = ExtendibleHashing(meta["path"], schema, key_field=colname)
-                eh.insert(row)
-
-        # B+Tree (clustered)
-        for colname in indexes.keys():
-            meta = self._get_index_meta(indexes, colname, "bptree")
-            if meta:
-                bpt = ClusteredIndexFile.load(data_path, meta["path"], schema)
-                bpt.insert(row)
-
-        # ISAM (si existe)
-        for colname in indexes.keys():
-            meta = self._get_index_meta(indexes, colname, "isam")
-            if meta:
-                isam = ISAMFile(meta["path"], schema, key_field=colname)
-                isam.insert(row)
-
-        return {"ok": True, "table": stmt.table_name}
-
-    # ---------------- DELETE ----------------
-    def _exec_delete(self, stmt: DeleteStatement) -> Dict[str, Any]:
-        tinfo = self.catalog.get_table(stmt.table_name)
-        if not tinfo:
-            raise ValueError(f"Tabla {stmt.table_name} no registrada")
-        schema: Schema = tinfo["schema"]
-        data_path: str = tinfo["data_path"]
-        indexes = tinfo.get("indexes", {})
-
-        wc = stmt.where_clause
-        if not wc or wc["type"] != "equality":
-            raise NotImplementedError("DELETE soporta solo igualdad por clave/columna indexada")
-        col = wc["column"]; key = wc["value"]
-        removed = 0
-
-        meta = self._get_index_meta(indexes, col, "exthash")
-        if meta:
-            eh = ExtendibleHashing(meta["path"], schema, key_field=col)
-            if eh.remove(key):
-                removed += 1
-
-        meta = self._get_index_meta(indexes, col, "bptree")
-        if meta:
-            bpt = ClusteredIndexFile.load(data_path, meta["path"], schema)
-            removed += bpt.remove(str(key))
-
-        meta = self._get_index_meta(indexes, col, "isam")
-        if meta:
-            isam = ISAMFile(meta["path"], schema, key_field=col)
-            ok = isam.delete(int(key) if self._is_int(schema, col) else key)
-            if ok:
-                removed += 1
-
-        return {"ok": True, "removed": removed}
-
-    # ---------------- helpers ----------------
-    def _apply_filter(self, rows: List[Dict[str, Any]], wc: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if not wc:
-            return rows
-        t = wc["type"]; c = wc["column"]
-        if t == "equality":
-            op = wc["operator"]; v = wc["value"]
-            if op in ("=", "=="): return [r for r in rows if r.get(c) == v]
-            if op == "!=":        return [r for r in rows if r.get(c) != v]
-            if op == "<":         return [r for r in rows if r.get(c) < v]
-            if op == "<=":        return [r for r in rows if r.get(c) <= v]
-            if op == ">":         return [r for r in rows if r.get(c) > v]
-            if op == ">=":        return [r for r in rows if r.get(c) >= v]
-        if t == "range":
-            a, b = wc["start"], wc["end"]
-            return [r for r in rows if a <= r.get(c) <= b]
+    def scan(self, limit: int = 200) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        entries = self.seq.sparse.read()
+        for pid in range(len(entries)):
+            page = self.seq._read_page(pid)
+            for r in page.records:
+                rows.append(r)
+                if len(rows) >= limit:
+                    return rows
         return rows
 
-    def _extract_range_bounds(self, wc: Dict[str, Any], schema: Schema, col: str) -> Tuple[Any, Any]:
-        if wc["type"] == "range":
-            return wc["start"], wc["end"]
-        v = wc.get("value"); op = wc.get("operator")
-        if op in ("<", "<="): return (self._min_of(schema, col), v)
-        if op in (">", ">="): return (v, self._max_of(schema, col))
-        raise ValueError("Rango no reconocible")
+class ExtHashAdapter(BaseAdapter):
+    def __init__(self, base_name: str, schema: Schema, key_field: str):
+        self.schema = schema; self.key = key_field
+        self.eh = ExtendibleHashing(f"{base_name}_ext_hash", schema, key_field)
 
-    def _infer_kind(self, schema: Schema, col: str):
-        f = next(f for f in schema.fields if f.name == col)
-        return f.kind
+    def build_from_csv(self, csv_path: str):
+        for r in _load_csv_rows(csv_path):
+            self.add(r)
 
-    def _is_int(self, schema: Schema, col: str) -> bool:
-        f = next(f for f in schema.fields if f.name == col)
-        return f.kind.name == "INT"
+    def search(self, key: Any) -> List[Dict[str, Any]]:
+        r = self.eh.search(key)
+        return [r] if r else []
 
-    def _min_of(self, schema: Schema, col: str):
-        return "" if not self._is_int(schema, col) else -2**31
+    def add(self, rec: Dict[str, Any]):
+        self.eh.insert(_coerce_to_schema(self.schema, rec))
 
-    def _max_of(self, schema: Schema, col: str):
-        return "\uffff" if not self._is_int(schema, col) else 2**31-1
+    def remove(self, key: Any) -> int:
+        return 1 if self.eh.remove(key) else 0
 
-    def _get_index_meta(self, indexes, col, kind_name):
-        bucket = indexes.get(col, {})
-        if "type" in bucket and "path" in bucket:
-            t = bucket["type"]
-            name = getattr(t, "name", str(t)).upper()
-            val = getattr(t, "value", name).upper()
-            if kind_name == "bptree"  and ("BTREE" in (name, val)):
-                return bucket
-            if kind_name == "isam"    and ("ISAM"  in  name):
-                return bucket
-            if kind_name == "exthash" and (name=="EXTENDIBLE_HASH" or val=="EXTHASH"):
-                return bucket
-            return None
-        for meta in bucket.values():
-            t = meta["type"]
-            name = getattr(t, "name", str(t)).upper()
-            val  = getattr(t, "value", name).upper()
-            if kind_name == "bptree"  and ("BTREE" in (name, val)):
-                return meta
-            if kind_name == "isam"    and ("ISAM"  in  name):
-                return meta
-            if kind_name == "exthash" and (name=="EXTENDIBLE_HASH" or val=="EXTHASH"):
-                return meta
-        return None
+    def range_search(self, a: Any, b: Any) -> Iterable[Dict[str, Any]]:
+        raise NotImplementedError("Extendible Hashing no soporta range_search")
 
-    def _build_schema_from_columns(self, cols: List[Column]) -> Schema:
-        fields: List[Field] = []
-        for c in cols:
-            if c.data_type == DataType.INT:
-                fields.append(Field(c.name, Kind.INT, fmt="i"))
-            elif c.data_type == DataType.FLOAT:
-                fields.append(Field(c.name, Kind.FLOAT, fmt="f"))
-            elif c.data_type == DataType.VARCHAR:
-                if not c.size:
-                    raise ValueError(f"VARCHAR requiere tamaño en {c.name}")
-                fields.append(Field(c.name, Kind.CHAR, size=c.size))
-            elif c.data_type == DataType.DATE:
-                fields.append(Field(c.name, Kind.DATE))
-            elif c.data_type == DataType.ARRAY:
-                raise NotImplementedError("ARRAY no soportado en Schema binario actual")
+    def scan(self, limit: int = 200) -> List[Dict[str, Any]]:
+        out = []
+        for r in self.eh.iter_all():
+            out.append(r)
+            if len(out) >= limit:
+                break
+        return out
+
+class BPTreeAdapter(BaseAdapter):
+    def __init__(self, base_name: str, schema: Schema, key_field: str):
+        self.schema = schema; self.key = key_field
+        self.path = os.path.join(OUT_DIR, f"{base_name}_bptree.dat")
+        self.bpt = BPlusClusteredFile(self.path, schema, key_field)
+
+    def build_from_csv(self, csv_path: str):
+        rows = _load_csv_rows(csv_path)
+        for r in rows:
+            self.add(r)
+
+    def search(self, key: Any) -> List[Dict[str, Any]]:
+        return self.bpt.search(key)
+
+    def range_search(self, a: Any, b: Any) -> Iterable[Dict[str, Any]]:
+        return self.bpt.range_search(a, b)
+
+    def add(self, rec: Dict[str, Any]):
+        self.bpt.insert(_coerce_to_schema(self.schema, rec))
+
+    def remove(self, key: Any) -> int:
+        return self.bpt.remove(key, only_first=True)
+
+    def scan(self, limit: int = 200) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for r in self.bpt.iter_all():
+            out.append(r)
+            if len(out) >= limit: break
+        return out
+
+class RTreeIdxAdapter(BaseAdapter):
+    def __init__(self, base_name: str, schema: Schema, key_field: str, x="x", y="y", z="z", label_field=None):
+        self.schema = schema
+        self.key = key_field
+        self.x, self.y, self.z = x, y, z
+        self.label = label_field or key_field
+        self.rt = RTreeAdapter(os.path.join(OUT_DIR, f"{base_name}_rtree"))
+
+    def build_from_csv(self, csv_path: str):
+        rows = _load_csv_rows(csv_path)
+        self.rt.build_from_csv(rows, self.x, self.y, self.z, label_field=self.label, schema=self.schema)
+
+    def search(self, key: Any) -> List[Dict[str, Any]]:
+        return self.rt.search_by_label(key)
+
+    def add(self, rec: Dict[str, Any]):
+        self.rt.add(rec, self.x, self.y, self.z, label_field=self.label, schema=self.schema)
+
+    def remove(self, key: Any) -> int:
+        return self.rt.remove_by_label(key)
+
+    def range_search(self, a: Any, b: Any) -> Iterable[Dict[str, Any]]:
+        return []
+
+    def spatial_range(self, point: Tuple[float, ...], radius: float) -> List[Dict[str, Any]]:
+        return self.rt.range(point, radius)
+
+    def knn(self, point: Tuple[float, ...], k: int) -> List[Dict[str, Any]]:
+        return self.rt.knn(point, k)
+
+
+@dataclass
+class TableHandle:
+    name: str
+    schema: Schema
+    key: Optional[str]
+    adapter: BaseAdapter
+    idx_type: IndexType
+
+class Engine:
+    def __init__(self):
+        self.parser = ParserSQL()
+        self.catalog = Catalog()
+        self.tables: Dict[str, TableHandle] = {}
+
+    def execute(self, sql: str) -> Dict[str, Any]:
+        st = self.parser.parse(sql)
+        self.parser.validate_statement(st)
+
+        if isinstance(st, CreateTableStatement):
+            return self._exec_create(st)
+        if isinstance(st, SelectStatement):
+            return self._exec_select(st)
+        if isinstance(st, InsertStatement):
+            return self._exec_insert(st)
+        if isinstance(st, DeleteStatement):
+            return self._exec_delete(st)
+        return {"status": "error", "message": "Sentencia no soportada"}
+
+    def _exec_create(self, st: CreateTableStatement) -> Dict[str, Any]:
+        if not st.from_file:
+            schema = _schema_from_columns(st.columns)
+            key_col = next((c.name for c in st.columns if c.is_key), None)
+            idx_type = next((c.index_type for c in st.columns if c.index_type), IndexType.SEQUENTIAL)
+            adapter = self._make_adapter(st.table_name, schema, key_col or st.columns[0].name, idx_type)
+
+            self.catalog.register_table(
+                st.table_name,
+                {"columns": [f.name for f in schema.fields], "key": key_col},
+                os.path.join(OUT_DIR, f"{st.table_name}.dat")
+            )
+            if key_col:
+                self.catalog.register_index(
+                    st.table_name, key_col, idx_type, os.path.join(OUT_DIR, f"{st.table_name}.dat")
+                )
+
+            self.tables[st.table_name] = TableHandle(st.table_name, schema, key_col, adapter, idx_type)
+            return {"status": "ok", "message": f"Tabla '{st.table_name}' creada con índice {idx_type.value}"}
+
+        (idx_type, key_col) = st.using_index
+
+        if st.table_name not in self.tables:
+            return {"status": "error", "message": "Debe crear primero la tabla con columnas (CREATE TABLE ...)"}
+
+        th = self.tables[st.table_name]
+
+        if key_col not in [f.name for f in th.schema.fields]:
+            return {"status": "error",
+                    "message": f"La columna índice '{key_col}' no existe en la tabla '{st.table_name}'"}
+
+        if th.idx_type != idx_type or th.key != key_col:
+            th.adapter = self._make_adapter(st.table_name, th.schema, key_col, idx_type)
+            th.idx_type = idx_type
+            th.key = key_col
+
+        th.adapter.build_from_csv(st.from_file)
+
+        self.catalog.register_index(
+            st.table_name, key_col, idx_type, os.path.join(OUT_DIR, f"{st.table_name}.dat")
+        )
+        return {"status": "ok", "message": f"Datos cargados desde CSV con índice {idx_type.value}"}
+
+    def _make_adapter(self, table: str, schema: Schema, key_col: str, idx_type: IndexType) -> BaseAdapter:
+        base = table.lower()
+
+        idx_name = getattr(idx_type, "name", None) or str(idx_type)
+        idx_name = idx_name.upper()
+
+        if idx_name == "SEQUENTIAL":
+            return SequentialAdapter(base, schema, key_col)
+
+        if idx_name == "ISAM":
+            storage_schema = _ensure_isam_storage_schema(schema)
+            return ISAMAdapter(base, storage_schema, key_col)
+
+        if idx_name in ("EXTENDIBLE_HASH", "EXTHASH"):
+            return ExtHashAdapter(base, schema, key_col)
+
+        if idx_name in ("BPTREE", "BPTREE_CLUSTERED"):
+            return BPTreeAdapter(base, schema, key_col)
+
+        if idx_name == "RTREE":
+            return RTreeIdxAdapter(base, schema, key_col, x="x", y="y", z="z", label_field=key_col)
+
+        raise ValueError(f"Índice no soportado: {idx_type}")
+
+    def _exec_select(self, st: SelectStatement) -> Dict[str, Any]:
+        th = self._need(st.table_name)
+
+        if not st.where_clause and not st.spatial_query:
+            if hasattr(th.adapter, "scan"):
+                rows = th.adapter.scan(limit=200)
+                return {"status": "ok", "rows": rows}
+            return {"status": "ok", "rows": []}
+
+        if st.spatial_query:
+            if not isinstance(th.adapter, RTreeIdxAdapter):
+                return {"status": "error", "message": "La consulta espacial requiere índice RTree"}
+            sq = st.spatial_query
+            if sq["type"] == "spatial_range":
+                # point puede ser de 2 o 3 dimensiones; radius puede ser None → 0
+                pt_vals = [float(v) for v in sq["point"]]
+                rad = float(sq["radio"] or 0)
+                rows = th.adapter.spatial_range(tuple(pt_vals), rad)
+                return {"status": "ok", "rows": rows}
             else:
-                raise ValueError(f"Tipo no soportado: {c.data_type}")
-        return Schema(fields)
+                pt_vals = [float(v) for v in sq["point"]]
+                k = int(sq["k"])
+                rows = th.adapter.knn(tuple(pt_vals), k)
+                return {"status": "ok", "rows": rows}
 
-    def _schema_with_deleted(self, schema: Schema) -> Schema:
-        if any(f.name == "deleted" for f in schema.fields):
-            return schema
-        fields = list(schema.fields) + [Field("deleted", Kind.INT, fmt="B")]
-        return Schema(fields, deleted_name="deleted")
+
+        if not st.where_clause:
+            return {"status": "ok", "rows": []}
+
+        wc = st.where_clause
+        if wc["type"] == "equality":
+            rows = th.adapter.search(wc["value"])
+            return {"status": "ok", "rows": rows}
+        elif wc["type"] == "range":
+            if hasattr(th.adapter, "range_search"):
+                try:
+                    rows = list(th.adapter.range_search(wc["start"], wc["end"]))
+                    return {"status": "ok", "rows": rows}
+                except NotImplementedError:
+                    return {"status": "error", "message": "El índice no soporta range_search"}
+        return {"status": "error", "message": "WHERE no soportado"}
+
+    def _exec_insert(self, st: InsertStatement) -> Dict[str, Any]:
+        th = self._need(st.table_name)
+        user_cols = [f for f in th.schema.fields if f.name != th.schema.deleted_name]
+        if len(st.values) != len(user_cols):
+            return {"status": "error",
+                    "message": f"INSERT esperaba {len(user_cols)} valores (sin incluir '{th.schema.deleted_name}')"}
+
+        row = {f.name: v for f, v in zip(user_cols, st.values)}
+        if any(f.name == th.schema.deleted_name for f in th.schema.fields):
+            row[th.schema.deleted_name] = 0
+
+        th.adapter.add(row)
+        return {"status": "ok", "rows_affected": 1}
+
+    def _exec_delete(self, st: DeleteStatement) -> Dict[str, Any]:
+        th = self._need(st.table_name)
+        wc = st.where_clause
+        if wc["type"] != "equality":
+            return {"status": "error", "message": "DELETE sólo soporta igualdad por ahora"}
+        n = th.adapter.remove(wc["value"])
+        return {"status": "ok", "rows_affected": int(n)}
+
+    def _need(self, table: str) -> TableHandle:
+        if table not in self.tables:
+            raise ValueError(f"Tabla no registrada: {table}")
+        return self.tables[table]
+
+
+# Pequeña prueba CLI / REPL interactivo
+if __name__ == "__main__":
+    import sys
+
+    def _read_stmt(prompt: str, require_create: bool = False) -> str:
+        """
+        Lee varias líneas hasta:
+          - balance de paréntesis cerrado (útil para CREATE TABLE (...))
+          - o aparición de ';' fuera de comillas
+        """
+        lines = []
+        depth = 0
+        while True:
+            line = input(prompt if not lines else "... ").rstrip()
+            if not lines and require_create:
+                head = line.strip().upper()
+                if not head.startswith("CREATE TABLE"):
+                    print(" Primero debes ejecutar un CREATE TABLE (con columnas y tamaños), sin FROM FILE.")
+                    lines.clear()
+                    depth = 0
+                    continue
+
+            lines.append(line)
+            depth += line.count("(") - line.count(")")
+
+            trimmed = line.strip()
+            if trimmed.endswith(";"):
+                break
+            if depth <= 0 and (require_create and trimmed.endswith(")")):
+                break
+
+        sql = "\n".join(lines)
+        if sql.strip().endswith(";"):
+            sql = sql.rstrip().rstrip(";")
+        return sql
+
+    eng = Engine()
+    print("\n=== Mini-DB Interactivo ===")
+    print("Reglas:")
+    print("  - Primero DEBES crear la tabla con tamaños fijos: CREATE TABLE ...")
+    print("  - Recién después puedes cargar un CSV con: CREATE TABLE ... FROM FILE ... USING INDEX ...")
+    print("  - Índices soportados: SEQUENTIAL (default), ISAM, EXTHASH, BPTREE, RTREE")
+    print("  - Comandos especiales: :help  :tables  :exit\n")
+
+    # 1) Forzar que el usuario empiece con CREATE TABLE
+    table_name = None
+    while True:
+        try:
+            sql = _read_stmt("SQL (debe ser CREATE TABLE ...): ", require_create=True)
+        except (EOFError, KeyboardInterrupt):
+            print("\nSaliendo.")
+            sys.exit(0)
+
+        if sql.lower() in (":exit", "exit", "quit"):
+            print("Saliendo.")
+            sys.exit(0)
+        if sql.lower() in (":help", "help"):
+            print("Ejemplo CREATE:\n"
+                  "  CREATE TABLE Inventario3D(\n"
+                  "    BoxID INT KEY INDEX RTREE,\n"
+                  "    x FLOAT, y FLOAT, z FLOAT,\n"
+                  "    Producto VARCHAR[40]\n"
+                  "  )\n")
+            continue
+
+        try:
+            st = eng.parser.parse(sql)
+            eng.parser.validate_statement(st)
+            if not isinstance(st, CreateTableStatement) or st.from_file:
+                print("Primero un CREATE TABLE (con columnas/tamaños), sin FROM FILE.")
+                continue
+            res = eng.execute(sql)
+            print(res)
+            table_name = st.table_name
+            break
+        except Exception as e:
+            print("ERROR:", e)
+
+    # REPL libre
+    print("\n=== REPL SQL ===")
+    print("Escribe SQL; usa :tables para ver tablas/index; :help para ayuda; :exit para salir.")
+    while True:
+        try:
+            line = _read_stmt("SQL> ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nSaliendo.")
+            break
+
+        if not line:
+            continue
+        cmd = line.lower()
+
+        if cmd in (":exit", "exit", "quit"):
+            print("Saliendo.")
+            break
+        if cmd in (":help", "help"):
+            print("Ejemplos:\n"
+                  "  SELECT * FROM MiTabla WHERE id = 123;\n"
+                  "  SELECT * FROM MiTabla WHERE id BETWEEN 10 AND 20;\n"
+                  "  INSERT INTO MiTabla VALUES (...);\n"
+                  "  DELETE FROM MiTabla WHERE id = 1;\n"
+                  "Comandos:\n"
+                  "  :tables  -> listar tablas registradas\n"
+                  "  :exit    -> salir\n")
+            continue
+        if cmd == ":tables":
+            if not eng.tables:
+                print("(sin tablas)")
+            else:
+                for name, th in eng.tables.items():
+                    print(f"- {name}: key={th.key}, idx={th.idx_type.name}, cols={[f.name for f in th.schema.fields]}")
+            continue
+
+        try:
+            print(eng.execute(line))
+        except Exception as e:
+            print("ERROR:", e)

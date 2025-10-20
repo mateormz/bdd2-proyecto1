@@ -1,6 +1,6 @@
 # backend/src/catalog.py
 from typing import Dict, Any, Optional
-from src.parser_sql import IndexType
+from parser_sql import IndexType
 
 class Catalog:
     def __init__(self):
@@ -12,10 +12,7 @@ class Catalog:
     def register_index(self, table: str, column: str, idx_type: IndexType, path: str) -> None:
         if table not in self.tables:
             raise ValueError(f"Tabla '{table}' no registrada")
-        idxs = self.tables[table].setdefault("indexes", {})
-        col = column
-        bucket = idxs.setdefault(col, {})   # <- dict por columna
-        bucket[idx_type.name] = {"type": idx_type, "path": path}
+        self.tables[table]["indexes"][column] = {"type": idx_type, "path": path}
 
     def get_table(self, name: str) -> Dict[str, Any]:
         return self.tables.get(name, {})

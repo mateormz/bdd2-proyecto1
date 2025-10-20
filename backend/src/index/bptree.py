@@ -1,408 +1,353 @@
 # B+ Tree Clustered File - Index
-
 from __future__ import annotations
-import csv
-import os
-import pickle
-import shutil
-from dataclasses import dataclass, field
-from typing import Any, Iterable, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Callable
+import os, struct, bisect, pickle, sys
 
 
-
-import sys, os
-# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from src.core.schema import Schema, Field, Kind
-#from ..core.schema import Schema, Field, Kind
-#from core.schema import Schema, Field, Kind
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from core.schema import Schema, Kind
 
 
+PAGE_SIZE   = 4096
+MAGIC       = b"BPTCFS1\0"
+VERSION     = 1
+ORDER_HINT  = 64
 
-def cast_key(kind: Kind, raw: Any) -> Any:
+def _key_norm(v: Any, kind: Kind) -> Any:
+    if v is None:
+        if kind == Kind.INT:   return 0
+        if kind == Kind.FLOAT: return 0.0
+        if kind == Kind.DATE:  return ""
+        return ""
     if kind == Kind.INT:
-        return int(raw)
+        return int(v)
     if kind == Kind.FLOAT:
-        return float(raw)
-    return str(raw)
+        return float(v)
+    if kind == Kind.DATE:
+        return str(v)[:10]
+    return str(v)
 
+class IOStats:
+    def __init__(self): self.reads = 0; self.writes = 0
+    def reset(self): self.reads = 0; self.writes = 0
+IO = IOStats()
 
+class Disk:
+    HEADER_FMT  = "<8sIQQQ"
+    HEADER_SIZE = struct.calcsize(HEADER_FMT)
+
+    def __init__(self, filename: str):
+        self.filename = filename
+        create = not os.path.exists(filename) or os.path.getsize(filename) == 0
+        self.f = open(filename, "r+b" if not create else "w+b")
+        if create:
+            self.root_pid = 0
+            self.free_head = 0
+            self.num_pages = 1
+            self._write_header()
+        else:
+            self._read_header()
+
+    def _write_header(self):
+        self.f.seek(0)
+        hdr = struct.pack(self.HEADER_FMT, MAGIC, VERSION,
+                          self.root_pid, self.free_head, self.num_pages)
+        self.f.write(hdr + (b"\x00" * (PAGE_SIZE - len(hdr))))
+        IO.writes += 1
+
+    def _read_header(self):
+        self.f.seek(0)
+        raw = self.f.read(PAGE_SIZE); IO.reads += 1
+        magic, version, self.root_pid, self.free_head, self.num_pages = struct.unpack(
+            self.HEADER_FMT, raw[:self.HEADER_SIZE]
+        )
+        if magic != MAGIC:
+            raise ValueError("Archivo no es un B+ Tree Clustered válido.")
+
+    def alloc(self) -> int:
+        if self.free_head != 0:
+            pid = self.free_head
+            raw = self.read_raw(pid)
+            next_free = struct.unpack("<Q", raw[:8])[0]
+            self.free_head = next_free
+            self._write_header()
+            return pid
+        pid = self.num_pages
+        self.write_raw(pid, b"\x00")
+        self.num_pages += 1
+        self._write_header()
+        return pid
+
+    def free(self, pid: int):
+        buf = struct.pack("<Q", self.free_head)
+        self.write_raw(pid, buf)
+        self.free_head = pid
+        self._write_header()
+
+    def write_raw(self, pid: int, buf: bytes):
+        if len(buf) > PAGE_SIZE:
+            raise ValueError("Página excede PAGE_SIZE")
+        self.f.seek(pid * PAGE_SIZE)
+        self.f.write(buf + (b"\x00" * (PAGE_SIZE - len(buf))))
+        IO.writes += 1
+
+    def read_raw(self, pid: int) -> bytes:
+        self.f.seek(pid * PAGE_SIZE)
+        raw = self.f.read(PAGE_SIZE); IO.reads += 1
+        return raw
+
+    def set_root(self, pid: int):
+        self.root_pid = pid
+        self._write_header()
+
+    def close(self):
+        self.f.flush(); self.f.close()
+
+LEAF_HDR_FMT  = "<ciii"
+LEAF_HDR_SIZE = struct.calcsize(LEAF_HDR_FMT)
+
+class LeafPage:
+    def __init__(self, schema: Schema, block_factor: int,
+                 recs: Optional[List[Dict[str, Any]]] = None,
+                 prev_leaf: int = 0, next_leaf: int = 0):
+        self.schema = schema
+        self.block_factor = block_factor
+        self.recs: List[Dict[str, Any]] = [] if recs is None else recs
+        self.prev_leaf = prev_leaf
+        self.next_leaf = next_leaf
+
+    def pack(self) -> bytes:
+        if len(self.recs) > self.block_factor:
+            raise ValueError("Overflow en LeafPage.pack()")
+        out = [struct.pack(LEAF_HDR_FMT, b"L", len(self.recs),
+                           self.prev_leaf, self.next_leaf)]
+        for r in self.recs:
+            out.append(self.schema.pack(r))
+        if len(self.recs) < self.block_factor:
+            out.append(b"\x00" * ((self.block_factor - len(self.recs)) * self.schema.size))
+        return b"".join(out)
+
+    @staticmethod
+    def unpack(buf: bytes, schema: Schema, block_factor: int) -> "LeafPage":
+        tag, count, prev_leaf, next_leaf = struct.unpack(
+            LEAF_HDR_FMT, buf[:LEAF_HDR_SIZE]
+        )
+        if tag != b"L":
+            raise ValueError("Página no es hoja")
+        recs: List[Dict[str, Any]] = []
+        off = LEAF_HDR_SIZE
+        for _ in range(count):
+            recs.append(schema.unpack(buf[off:off + schema.size]))
+            off += schema.size
+        return LeafPage(schema, block_factor, recs, prev_leaf, next_leaf)
 
 @dataclass
-class BPTNode:
+class InternalNode:
     is_leaf: bool
-    keys: List[Any] = field(default_factory=list)
-    values: Optional[List[List[int]]] = None
-    children: Optional[List["BPTNode"]] = None
-    next_leaf: Optional["BPTNode"] = None
-    order: int = 256
-    fanout: int = 256
+    keys: List[Any]
+    children: List[int]
 
-    def find_child_index(self, key) -> int:
-        lo, hi = 0, len(self.keys)
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if key < self.keys[mid]:
-                hi = mid
-            else:
-                lo = mid + 1
-        return lo
+def _write_internal(dsk: Disk, pid: int, node: InternalNode):
+    data = pickle.dumps(
+        {"is_leaf": False, "keys": node.keys, "children": node.children},
+        protocol=pickle.HIGHEST_PROTOCOL
+    )
+    dsk.write_raw(pid, data)
 
-    def find_leaf_pos(self, key) -> Tuple[bool, int]:
-        lo, hi = 0, len(self.keys)
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if self.keys[mid] == key:
-                return True, mid
-            if key < self.keys[mid]:
-                hi = mid
-            else:
-                lo = mid + 1
-        return False, lo
+def _read_internal(dsk: Disk, pid: int) -> InternalNode:
+    raw = dsk.read_raw(pid)
+    trimmed = raw.rstrip(b"\x00")
+    obj = pickle.loads(trimmed) if trimmed else {"keys": [], "children": []}
+    return InternalNode(False, list(obj.get("keys", [])), list(obj.get("children", [])))
 
-
-class BPlusTree:
-    def __init__(self, key_kind: Kind, leaf_capacity: int = 256, internal_fanout: int = 256):
-        self.key_kind = key_kind
-        self.leaf_capacity = leaf_capacity
-        self.internal_fanout = internal_fanout
-        self.root: Optional[BPTNode] = None
-
-    def bulk_load(self, sorted_items: Iterable[Tuple[Any, int]]):
-        leaves: List[BPTNode] = []
-        leaf = BPTNode(is_leaf=True, order=self.leaf_capacity, fanout=self.internal_fanout,
-                       keys=[], values=[])
-        last_key = object()
-        for key, off in sorted_items:
-            if leaf.keys and len(leaf.keys) >= self.leaf_capacity and key != last_key:
-                leaves.append(leaf)
-                nxt = BPTNode(is_leaf=True, order=self.leaf_capacity, fanout=self.internal_fanout,
-                              keys=[], values=[])
-                leaf.next_leaf = nxt
-                leaf = nxt
-            if leaf.keys and key == leaf.keys[-1]:
-                leaf.values[-1].append(off)
-            else:
-                leaf.keys.append(key)
-                leaf.values.append([off])
-            last_key = key
-        if leaf.keys:
-            leaves.append(leaf)
-        if not leaves:
-            self.root = BPTNode(is_leaf=True, order=self.leaf_capacity, fanout=self.internal_fanout,
-                                keys=[], values=[])
-            return
-
-        level = leaves
-        while len(level) > 1:
-            nxt_level: List[BPTNode] = []
-            for i in range(0, len(level), self.internal_fanout):
-                chunk = level[i:i + self.internal_fanout]
-                sep = [c.keys[0] for c in chunk[1:]]
-                parent = BPTNode(is_leaf=False, keys=sep, children=chunk,
-                                 order=self.leaf_capacity, fanout=self.internal_fanout)
-                nxt_level.append(parent)
-            level = nxt_level
-        self.root = level[0]
-
-    def _find_leaf(self, key) -> Optional[BPTNode]:
-        node = self.root
-        if not node:
-            return None
-        while not node.is_leaf:
-            node = node.children[node.find_child_index(key)]
-        return node
-
-    def search(self, key) -> List[int]:
-        node = self._find_leaf(key)
-        if not node:
-            return []
-        found, pos = node.find_leaf_pos(key)
-        if not found:
-            return []
-        return list(node.values[pos])
-
-    def range_search(self, lo, hi) -> List[int]:
-        node = self._find_leaf(lo)
-        if not node:
-            return []
-        offs: List[int] = []
-        while node:
-            for k, vs in zip(node.keys, node.values):
-                if k < lo:
-                    continue
-                if k > hi:
-                    return offs
-                offs.extend(vs)
-            node = node.next_leaf
-        return offs
+def _is_leaf_page(raw: bytes) -> bool:
+    return len(raw) >= 1 and raw[0:1] == b"L"
 
 
 
-class ClusteredIndexFile:
-    def __init__(self, data_path: str, index_path: str, schema: Schema,
-                 key_field: str, key_kind: Kind,
-                 leaf_cap: int = 256, fanout: int = 256):
-        self.data_path = data_path
-        self.index_path = index_path
+
+
+
+
+
+
+
+
+
+class BPlusClusteredFile:
+    def __init__(self, filename: str, schema: Schema, key_field: str, order_hint: int = ORDER_HINT):
+        self.dsk = Disk(filename)
         self.schema = schema
         self.key_field = key_field
-        self.key_kind = key_kind
-        self.tree = BPlusTree(key_kind, leaf_capacity=leaf_cap, internal_fanout=fanout)
+        self.key_kind: Kind = next(f.kind for f in schema.fields if f.name == key_field)
+        self.order = int(order_hint) if order_hint and order_hint > 3 else ORDER_HINT
+        self.block_factor = max(1, (PAGE_SIZE - LEAF_HDR_SIZE) // self.schema.size)
 
 
-    def _count_records(self) -> int:
-        if not os.path.exists(self.data_path):
-            return 0
-        return os.path.getsize(self.data_path) // self.schema.size
-
-    def _read_row_at(self, f, idx: int) -> dict:
-        f.seek(idx * self.schema.size)
-        return self.schema.unpack(f.read(self.schema.size))
-
-    def _read_key_at(self, f, idx: int) -> Any:
-        return cast_key(self.key_kind, self._read_row_at(f, idx)[self.key_field])
-
-    def _bisect_left(self, f, n: int, key) -> int:
-        lo, hi = 0, n
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if self._read_key_at(f, mid) < key:
-                lo = mid + 1
-            else:
-                hi = mid
-        return lo
-
-    def _bisect_right(self, f, n: int, key) -> int:
-        lo, hi = 0, n
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if key < self._read_key_at(f, mid):
-                hi = mid
-            else:
-                lo = mid + 1
-        return lo
 
 
-    def build_from_csv(self, csv_path: str):
-        rows: List[Tuple[Any, dict]] = []
-        with open(csv_path, newline='', encoding='utf-8') as f:
-            r = csv.DictReader(f)
-            expected = [f.name for f in self.schema.fields]
-            if r.fieldnames != expected:
-                raise ValueError(f"Cabecera CSV incorrecta. Esperada {expected}, obtenida {r.fieldnames}")
-            for row in r:
-                k = cast_key(self.key_kind, row[self.key_field])
-                rows.append((k, row))
-        rows.sort(key=lambda kv: kv[0])
 
-        os.makedirs(os.path.dirname(self.data_path), exist_ok=True)
-        with open(self.data_path, 'wb') as binf:
-            for _, row in rows:
-                binf.write(self.schema.pack(row))
+        if self.dsk.root_pid == 0:
+            leaf_pid = self.dsk.alloc()
+            self.dsk.write_raw(leaf_pid, LeafPage(self.schema, self.block_factor).pack())
+            self.dsk.set_root(leaf_pid)
 
-        self._rebuild_index()
+    def _load(self, pid: int):
+        raw = self.dsk.read_raw(pid)
+        if _is_leaf_page(raw):
+            return LeafPage.unpack(raw, self.schema, self.block_factor), True
+        return _read_internal(self.dsk, pid), False
 
-    def _rebuild_index(self):
-        pairs: List[Tuple[Any, int]] = []
-        if not os.path.exists(self.data_path):
-            self.tree = BPlusTree(self.key_kind)
+    def _save(self, pid: int, node, is_leaf: bool):
+        if is_leaf:
+            self.dsk.write_raw(pid, node.pack())
         else:
-            with open(self.data_path, 'rb') as f:
-                n = self._count_records()
-                for i in range(n):
-                    f.seek(i * self.schema.size)
-                    buf = f.read(self.schema.size)
-                    row = self.schema.unpack(buf)
-                    key = cast_key(self.key_kind, row[self.key_field])
-                    pairs.append((key, i * self.schema.size))
-            self.tree = BPlusTree(self.key_kind, leaf_capacity=256, internal_fanout=256)
-            self.tree.bulk_load(pairs)
+            _write_internal(self.dsk, pid, node)
 
-        meta = {
-            'key_field': self.key_field,
-            'key_kind': self.key_kind.value,
-            'schema_fmt': self.schema.fmt,
-            'schema_size': self.schema.size,
-        }
-        with open(self.index_path, 'wb') as pf:
-            pickle.dump({'meta': meta, 'tree': self.tree}, pf)
+    def _key_of(self, rec: Dict[str, Any]) -> Any:
+        return _key_norm(rec.get(self.key_field), self.key_kind)
 
+    def insert(self, rec: Dict[str, Any]):
+        rec = self.schema.coerce_row(rec)
+        key = self._key_of(rec)
+        split = self._ins_rec(self.dsk.root_pid, key, rec)
+        if split is not None:
+            sep_key, right_pid = split
+            old_root = self.dsk.root_pid
+            new_root = InternalNode(False, [sep_key], [old_root, right_pid])
+            new_pid = self.dsk.alloc()
+            self._save(new_pid, new_root, False)
+            self.dsk.set_root(new_pid)
 
-    def _rows_by_offsets(self, offsets: Iterable[int]) -> List[dict]:
-        out = []
-        with open(self.data_path, 'rb') as f:
-            for off in offsets:
-                f.seek(off)
-                out.append(self.schema.unpack(f.read(self.schema.size)))
+    def _ins_rec(self, pid: int, key: Any, rec: Dict[str, Any]):
+        node, is_leaf = self._load(pid)
+        if is_leaf:
+            pos = bisect.bisect_right([self._key_of(r) for r in node.recs], key)
+            node.recs.insert(pos, rec)
+            if len(node.recs) <= self.block_factor:
+                self._save(pid, node, True)
+                return None
+            mid = len(node.recs) // 2
+            right_recs = node.recs[mid:]
+            node.recs   = node.recs[:mid]
+            right = LeafPage(self.schema, self.block_factor, right_recs,
+                             prev_leaf=pid, next_leaf=node.next_leaf)
+            right_pid = self.dsk.alloc()
+            node.next_leaf = right_pid
+            self._save(pid, node, True)
+            self._save(right_pid, right, True)
+            sep_key = self._key_of(right.recs[0])
+            return (sep_key, right_pid)
+        else:
+            idx = bisect.bisect_left(node.keys, key)
+            child_pid = node.children[idx]
+            split = self._ins_rec(child_pid, key, rec)
+            if split is None:
+                return None
+            sep, right_pid = split
+            node.keys.insert(idx, sep)
+            node.children.insert(idx + 1, right_pid)
+            if len(node.keys) <= self.order:
+                self._save(pid, node, False)
+                return None
+            mid = len(node.keys) // 2
+            sep_up = node.keys[mid]
+            right = InternalNode(False, node.keys[mid + 1:], node.children[mid + 1:])
+            node.keys = node.keys[:mid]
+            node.children = node.children[:mid + 1]
+            right_pid2 = self.dsk.alloc()
+            self._save(pid, node, False)
+            self._save(right_pid2, right, False)
+            return (sep_up, right_pid2)
+
+    def search(self, key: Any) -> List[Dict[str, Any]]:
+        k = _key_norm(key, self.key_kind)
+        pid = self.dsk.root_pid
+        node, is_leaf = self._load(pid)
+        while not is_leaf:
+            idx = bisect.bisect_left(node.keys, k)
+            pid = node.children[idx]
+            node, is_leaf = self._load(pid)
+        keys = [self._key_of(r) for r in node.recs]
+        i = bisect.bisect_left(keys, k)
+        out: List[Dict[str, Any]] = []
+        while i < len(node.recs) and self._key_of(node.recs[i]) == k:
+            out.append(node.recs[i]); i += 1
         return out
 
-    def search(self, key_text: str) -> List[dict]:
-        k = cast_key(self.key_kind, key_text)
-        offs = self.tree.search(k)
-        return self._rows_by_offsets(offs)
+    def range_search(self, a: Any, b: Any) -> Iterable[Dict[str, Any]]:
+        lo, hi = _key_norm(a, self.key_kind), _key_norm(b, self.key_kind)
+        if lo > hi:
+            lo, hi = hi, lo
+        pid = self.dsk.root_pid
+        node, is_leaf = self._load(pid)
+        while not is_leaf:
+            idx = bisect.bisect_left(node.keys, lo)
+            pid = node.children[idx]
+            node, is_leaf = self._load(pid)
+        while True:
+            keys = [self._key_of(r) for r in node.recs]
+            i = bisect.bisect_left(keys, lo)
+            while i < len(node.recs) and self._key_of(node.recs[i]) <= hi:
+                yield node.recs[i]; i += 1
+            if node.next_leaf == 0:
+                break
+            nxt, leaf = self._load(node.next_leaf)
+            if not leaf:
+                break
+            if len(nxt.recs) and self._key_of(nxt.recs[0]) > hi:
+                break
+            node = nxt
 
-    def range_search(self, lo_text: str, hi_text: str) -> List[dict]:
-        lo = cast_key(self.key_kind, lo_text)
-        hi = cast_key(self.key_kind, hi_text)
-        offs = self.tree.range_search(lo, hi)
-        return self._rows_by_offsets(offs)
+    def remove(self, key: Any, only_first: bool = False) -> int:
+        k = _key_norm(key, self.key_kind)
+        removed = self._rem_rec(self.dsk.root_pid, k, only_first)
+        root, leaf = self._load(self.dsk.root_pid)
+        if (not leaf) and len(root.children) == 1:
+            self.dsk.set_root(root.children[0])
+        return removed
 
-
-    def insert(self, row: dict):
-        key = cast_key(self.key_kind, row[self.key_field])
-        packed = self.schema.pack(row)
-        n = self._count_records()
-        os.makedirs(os.path.dirname(self.data_path), exist_ok=True)
-        tmp = self.data_path + ".tmp"
-
-        with open(self.data_path, 'rb') if os.path.exists(self.data_path) else open(self.data_path, 'wb') as src:
-            with open(tmp, 'wb') as dst:
-                if n == 0:
-                    dst.write(packed)
-                else:
-                    with open(self.data_path, 'rb') as f:
-                        pos = self._bisect_left(f, n, key)
-                    if pos > 0:
-                        with open(self.data_path, 'rb') as f:
-                            f.seek(0)
-                            dst.write(f.read(pos * self.schema.size))
-                    dst.write(packed)
-                    with open(self.data_path, 'rb') as f:
-                        f.seek(pos * self.schema.size)
-                        shutil.copyfileobj(f, dst)
-
-        os.replace(tmp, self.data_path)
-        self._rebuild_index()
-
-    def remove(self, key_text: str) -> int:
-        if not os.path.exists(self.data_path):
+    def _rem_rec(self, pid: int, k: Any, only_first: bool) -> int:
+        node, is_leaf = self._load(pid)
+        if is_leaf:
+            keys = [self._key_of(r) for r in node.recs]
+            i = bisect.bisect_left(keys, k)
+            cnt = 0
+            while i < len(node.recs) and self._key_of(node.recs[i]) == k:
+                node.recs.pop(i); cnt += 1
+                if only_first: break
+            self._save(pid, node, True)
+            return cnt
+        idx = bisect.bisect_left(node.keys, k)
+        child_pid = node.children[idx]
+        removed = self._rem_rec(child_pid, k, only_first)
+        if removed == 0:
             return 0
-        key = cast_key(self.key_kind, key_text)
-        n = self._count_records()
-        if n == 0:
-            return 0
+        self._save(pid, node, False)
+        return removed
 
-        with open(self.data_path, 'rb') as f:
-            lo = self._bisect_left(f, n, key)
-            hi = self._bisect_right(f, n, key)
-        if lo == hi:
-            return 0
+    def iter_all(self) -> Iterable[Dict[str, Any]]:
+        pid = self.dsk.root_pid
+        node, is_leaf = self._load(pid)
+        while not is_leaf:
+            pid = node.children[0]
+            node, is_leaf = self._load(pid)
+        while True:
+            for r in node.recs:
+                yield r
+            if node.next_leaf == 0:
+                break
+            node, is_leaf = self._load(node.next_leaf)
 
-        tmp = self.data_path + ".tmp"
-        with open(self.data_path, 'rb') as src, open(tmp, 'wb') as dst:
-            src.seek(0)
-            dst.write(src.read(lo * self.schema.size))
-            src.seek(hi * self.schema.size)
-            shutil.copyfileobj(src, dst)
+    def close(self):
+        self.dsk.close()
 
-        os.replace(tmp, self.data_path)
-        self._rebuild_index()
-        return hi - lo
-
-
-    @classmethod
-    def load(cls, data_path: str, index_path: str, schema: Schema) -> "ClusteredIndexFile":
-        with open(index_path, 'rb') as pf:
-            payload = pickle.load(pf)
-        meta = payload['meta']
-        tree: BPlusTree = payload['tree']
-        inst = cls(data_path, index_path, schema,
-                   key_field=meta['key_field'],
-                   key_kind=Kind(meta['key_kind']),
-                   leaf_cap=tree.leaf_capacity,
-                   fanout=tree.internal_fanout)
-        inst.tree = tree
-        return inst
-
-
-def _prompt_row(fields: List[Field]) -> dict:
-    row = {}
-    print("Introduce valores para la nueva fila:")
-    for f in fields:
-        v = input(f"  {f.name} ({f.kind.value}) = ").strip()
-        row[f.name] = v
-    return row
-
-
-def main():
-    fields = [
-        Field("id", Kind.INT, fmt="i"),
-        Field("nombre", Kind.CHAR, size=20),
-        Field("precio", Kind.FLOAT, fmt="f"),
-        Field("fecha", Kind.DATE),
-    ]
-    schema = Schema(fields)
-
-    print("=== B+ Tree Clustered Index File ===")
-    csv_path = input("Ruta del CSV inicial (o vacío para saltar): ").strip()
-
-    valid = [f.name for f in fields]
-    print(f"Campos disponibles: {', '.join(valid)}")
-    key_field = input("Campo llave del índice: ").strip()
-    while key_field not in valid:
-        key_field = input("Campo llave del índice: ").strip()
-    key_kind = next(f.kind for f in fields if f.name == key_field)
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    out_dir = os.path.join(repo_root, "out")
-    os.makedirs(out_dir, exist_ok=True)
-    data_path = os.path.join(out_dir, "bptree_clustered.dat")
-    index_path = os.path.join(out_dir, "bptree_clustered.idx")
-
-    idx = ClusteredIndexFile(data_path, index_path, schema, key_field, key_kind,
-                             leaf_cap=256, fanout=256)
-
-    if csv_path:
-        idx.build_from_csv(csv_path)
-        print("Índice construido desde CSV.")
-
-    print("\nComandos:")
-    print("  point <key>")
-    print("  range <lo> <hi>")
-    print("  insert        (solicita valores)")
-    print("  remove <key>  (elimina todas las filas con esa clave)")
-    print("  quit")
-    while True:
-        try:
-            cmd = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-        if not cmd:
-            continue
-        parts = cmd.split()
-        op = parts[0].lower()
-
-        if op == "quit":
-            break
-
-        elif op == "point" and len(parts) == 2:
-            rows = idx.search(parts[1])
-            print(f"{len(rows)} resultado(s)")
-            for r in rows[:10]:
-                print(r)
-            if len(rows) > 10:
-                print("...")
-
-        elif op == "range" and len(parts) == 3:
-            rows = idx.range_search(parts[1], parts[2])
-            print(f"{len(rows)} resultado(s)")
-            for r in rows[:10]:
-                print(r)
-            if len(rows) > 10:
-                print("...")
-
-        elif op == "insert":
-            row = _prompt_row(fields)
-            idx.insert(row)
-            print("Insert OK.")
-
-        elif op == "remove" and len(parts) == 2:
-            removed = idx.remove(parts[1])
-            print(f"Eliminados: {removed}")
-
-        else:
-            print("Uso: point <key> | range <lo> <hi> | insert | remove <key> | quit")
-
-
-if __name__ == "__main__":
-    main()
+def build_from_rows(filename: str, schema: Schema, key_field: str,
+                    rows: List[Dict[str, Any]], order_hint: int = ORDER_HINT) -> BPlusClusteredFile:
+    if os.path.exists(filename):
+        os.remove(filename)
+    bpt = BPlusClusteredFile(filename, schema, key_field, order_hint)
+    for r in rows:
+        bpt.insert(r)
+    return bpt

@@ -1,142 +1,161 @@
 # backend/src/routes.py
-from __future__ import annotations
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Optional
 import os
-import pickle
 import time
-import shutil
-from pathlib import Path
-from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
-from pydantic import BaseModel
+from engine import Engine
+from parser_sql import IndexType
 
-# Importa core
-from src.engine import Engine
-from src.catalog import Catalog
-from src.parser_sql import parse_sql, CreateTableStatement, SelectStatement, InsertStatement, DeleteStatement
-from src.core.schema import Schema, Field, Kind
+eng = Engine()
 
 router = APIRouter()
 
-HERE = Path(__file__).resolve()
-SRC_DIR = HERE.parent
-BACKEND_DIR = SRC_DIR.parent
-OUT_DIR = BACKEND_DIR / "out"
-OUT_UPLOADS = OUT_DIR / "uploads"
-OUT_DIR.mkdir(parents=True, exist_ok=True)
-OUT_UPLOADS.mkdir(parents=True, exist_ok=True)
 
-CATALOG_PATH = OUT_DIR / "catalog.pickle"
+class SQLQuery(BaseModel):
+    query: str = Field(..., description="Sentencia SQL completa entendida por tu parser/engine")
 
-_engine: Optional[Engine] = None
-_catalog: Optional[Catalog] = None
+class LoadCSVRequest(BaseModel):
+    table_name: str
+    csv_path: str
+    index_type: str = Field(..., description="SEQUENTIAL | ISAM | EXTHASH | BPTREE | RTREE")
+    key_column: str = Field(..., description="Nombre de la columna clave/label")
+    x: str = "x"
+    y: str = "y"
+    z: Optional[str] = "z"
 
-def _load_or_init_catalog() -> Catalog:
-    global _catalog
-    if _catalog is not None:
-        return _catalog
-    if CATALOG_PATH.exists():
-        with open(CATALOG_PATH, "rb") as fh:
-            _catalog = pickle.load(fh)
-    else:
-        _catalog = Catalog()
-    return _catalog
+class SpatialRangeRequest(BaseModel):
+    table: str
+    # se acepta 2D [x,y] o 3D [x,y,z]; radio opcional
+    point: List[float] = Field(..., description="[x,y] o [x,y,z]")
+    radius: Optional[float] = None
+    coord_column: str = "x"
 
-def _save_catalog() -> None:
-    if _catalog is None:
-        return
-    CATALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CATALOG_PATH, "wb") as fh:
-        pickle.dump(_catalog, fh)
+class SpatialKNNRequest(BaseModel):
+    table: str
+    point: List[float] = Field(..., description="[x,y] o [x,y,z]")
+    k: int = 5
+    coord_column: str = "x"
 
-def _get_engine() -> Engine:
-    global _engine
-    if _engine is None:
-        cat = _load_or_init_catalog()
-        _engine = Engine(cat)
-    return _engine
+# Helpers
 
-class SQLBody(BaseModel):
-    sql: str
+def _normalize_index(name: str) -> IndexType:
+    n = (name or "").upper()
+    mapping = {
+        "SEQ": IndexType.SEQUENTIAL,
+        "SEQUENTIAL": IndexType.SEQUENTIAL,
+        "ISAM": IndexType.ISAM,
+        "EXTHASH": IndexType.EXTENDIBLE_HASH,
+        "EXTENDIBLE_HASH": IndexType.EXTENDIBLE_HASH,
+        "BTREE": IndexType.BTREE,
+        "BPTREE": IndexType.BTREE,
+        "BPTREE_CLUSTERED": IndexType.BPTREE_CLUSTERED,
+        "RTREE": IndexType.RTREE,
+    }
+    if n not in mapping:
+        raise HTTPException(status_code=400, detail=f"Índice no soportado: {name}")
+    return mapping[n]
 
-@router.get("/health")
-def health():
-    return {"status": "ok"}
-
-@router.get("/catalog")
-def get_catalog():
-    """Vista rápida del catálogo (tablas, data_path, índices)."""
-    cat = _load_or_init_catalog()
-    tables = []
-    for tname, meta in cat.tables.items():
-        schema: Schema = meta["schema"]
-        fields = [{"name": f.name, "kind": f.kind.name, "size": f.size} for f in schema.fields]
-        idxs = []
-        for col, imeta in meta.get("indexes", {}).items():
-            # acepta tanto forma plana como anidada
-            if "type" in imeta and "path" in imeta:
-                idxs.append({"column": col, "type": getattr(imeta["type"], "name", str(imeta["type"])), "path": imeta["path"]})
-            else:
-                for _, v in imeta.items():
-                    idxs.append({"column": col, "type": getattr(v["type"], "name", str(v["type"])), "path": v["path"]})
-        tables.append({
-            "name": tname,
-            "data_path": meta.get("data_path"),
-            "fields": fields,
-            "indexes": idxs,
-        })
-    return {"status": "success", "tables": tables}
+def _as_sql_value(v: Any) -> str:
+    if isinstance(v, str):
+        return f"'{v}'"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, list):
+        inner = ", ".join(_as_sql_value(x) for x in v)
+        return f"[{inner}]"
+    return str(v)
 
 @router.post("/sql")
-def execute_sql(body: SQLBody):
+def execute_sql(req: SQLQuery):
     """
-    Ejecuta SQL con el Engine real.
-    Devuelve { status, rows|ok, metrics, message, timing_ms }
+    Ejecuta SQL libre contra el Engine (usa tu parser_sql y engine.execute).
+    Devuelve {status, rows, message}, igual a engine.execute, con timing.
     """
-    engine = _get_engine()
-    sql = body.sql.strip()
-    if not sql:
-        raise HTTPException(status_code=400, detail="Query vacía")
-
     t0 = time.perf_counter()
     try:
-        res = engine.execute(sql)
-        _save_catalog()
-
-        timing_ms = round((time.perf_counter() - t0) * 1000, 3)
-        if "rows" in res:
-            return {"status": "success", "rows": res["rows"], "metrics": res.get("metrics", {}), "timing_ms": timing_ms}
-        else:
-            return {"status": "success", **{k: v for k, v in res.items()}, "timing_ms": timing_ms}
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
-    except ValueError as e:
+        result = eng.execute(req.query)
+        result["_elapsed_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+        return result
+    except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Fallo ejecutando SQL: {e}")
 
-@router.post("/upload")
-def upload_csv(file: UploadFile = File(...)):
+
+@router.get("/tables")
+def list_tables():
     """
-    Sube un CSV al servidor y retorna su ruta absoluta (para CREATE ... FROM FILE "...")
+    Lista tablas registradas en el Engine (name, key, idx_type, columns).
     """
+    out = []
+    for name, th in eng.tables.items():
+        out.append({
+            "name": name,
+            "key": th.key,
+            "idx_type": th.idx_type.name,
+            "columns": [f.name for f in th.schema.fields],
+        })
+    return {"tables": out}
+
+
+@router.post("/upload-csv")
+async def upload_csv(file: UploadFile = File(...)):
+    data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
+    os.makedirs(data_dir, exist_ok=True)
+    dest = os.path.join(data_dir, file.filename)
+
+    content = await file.read()
+    with open(dest, "wb") as f:
+        f.write(content)
+
+    return {"status": "ok", "path": dest}
+
+
+@router.post("/load-csv")
+def load_csv(req: LoadCSVRequest):
+    idx = _normalize_index(req.index_type)
+
+    # Validación simple existencia del CSV
+    if not os.path.exists(req.csv_path):
+        raise HTTPException(status_code=400, detail=f"No existe el archivo: {req.csv_path}")
+    sql = (
+        f'CREATE TABLE {req.table_name} FROM FILE "{req.csv_path}" '
+        f'USING INDEX {idx.name}("{req.key_column}")'
+    )
+
     try:
-        fname = file.filename or "data.csv"
-        if not fname.lower().endswith(".csv"):
-            fname += ".csv"
-        dst = OUT_UPLOADS / fname
-        if dst.exists():
-            stem = dst.stem
-            ext = dst.suffix
-            i = 1
-            while True:
-                cand = dst.with_name(f"{stem}_{i}{ext}")
-                if not cand.exists():
-                    dst = cand
-                    break
-                i += 1
-        with open(dst, "wb") as fh:
-            shutil.copyfileobj(file.file, fh)
-        return {"status": "success", "path": str(dst)}
+        result = eng.execute(sql)
+        return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"No se pudo subir el archivo: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/spatial/range")
+def spatial_range(req: SpatialRangeRequest):
+
+    p = req.point
+    if len(p) not in (2, 3):
+        raise HTTPException(status_code=400, detail="point debe ser [x,y] o [x,y,z]")
+    if req.radius is not None:
+        arr = [*p, float(req.radius)]
+    else:
+        arr = p
+
+    sql = f"SELECT * FROM {req.table} WHERE {req.coord_column} IN (point, {_as_sql_value(arr)})"
+    try:
+        return eng.execute(sql)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/spatial/knn")
+def spatial_knn(req: SpatialKNNRequest):
+    p = req.point
+    if len(p) not in (2, 3):
+        raise HTTPException(status_code=400, detail="point debe ser [x,y] o [x,y,z]")
+
+    sql = f"SELECT * FROM {req.table} WHERE {req.coord_column} IN ({req.k}, {_as_sql_value(p)})"
+    try:
+        return eng.execute(sql)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
