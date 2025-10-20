@@ -2,8 +2,8 @@ from __future__ import annotations
 import os, math, pickle, struct, sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from rtree import index as rtree_index
-from src.core.schema import Schema,Kind
-from io_counters import count_read, count_write, start_timing, stop_timing, reset_counters, get_counters
+from core.schema import Schema, Field, Kind
+from io_counters import count_read, count_write
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -52,8 +52,11 @@ class RTreeAdapter:
         for ext in (".dat", ".idx"):
             path = f"{self.base_path}{ext}"
             if os.path.exists(path):
-                try: os.remove(path)
-                except Exception: pass
+                try:
+                    os.remove(path)
+                    count_write()
+                except Exception:
+                    pass
 
     def _open_index(self, dimension: int):
         p = rtree_index.Property()
@@ -70,6 +73,7 @@ class RTreeAdapter:
         for _id, payload in old_payloads:
             pt = tuple(payload["point"])
             self.idx.insert(int(_id), _bbox_from_point(pt))
+            count_write()
         self._save_meta()
 
     def _ensure_dimension(self, want_dim: int):
@@ -81,10 +85,8 @@ class RTreeAdapter:
         self._reset_meta(dim)
         self._delete_index_files_only()
         self._open_index(dim)
-        start_timing()
         for row in rows:
             self.add(row, x_field, y_field, z_field=z_field, label_field=label_field, schema=schema)
-        stop_timing()
 
     def add(self, row: Dict[str, Any], x_field: str, y_field: str, z_field: Optional[str] = None, label_field: Optional[str] = None, schema: Optional[Schema] = None):
         if schema is not None:
@@ -101,6 +103,7 @@ class RTreeAdapter:
         _id = int(self.meta["next_id"])
         self.meta["next_id"] = _id + 1
         self.idx.insert(_id, _bbox_from_point(pt))
+        count_write()
         self.meta["id_to_payload"][_id] = {"point": pt, "row": dict(row), "label": label_str}
         self.meta["label_to_ids"].setdefault(label_str, []).append(_id)
         self._save_meta()
@@ -117,7 +120,8 @@ class RTreeAdapter:
                 self.idx.delete(int(_id), _bbox_from_point(pt))
                 removed += 1
                 count_write()
-            except Exception: pass
+            except Exception:
+                pass
             self.meta["id_to_payload"].pop(_id, None)
             try: self.meta["label_to_ids"][label_str].remove(_id)
             except ValueError: pass
@@ -148,7 +152,6 @@ class RTreeAdapter:
             query_box = (x-radius, y-radius, x+radius, y+radius)
             qpt = (x, y)
         results: List[Tuple[float, Dict[str, Any]]] = []
-        start_timing()
         for obj in self.idx.intersection(query_box, objects=True):
             count_read()
             _id = int(obj.id)
@@ -160,7 +163,6 @@ class RTreeAdapter:
                 row = dict(payload["row"])
                 row["_distance"] = float(round(d, 6))
                 results.append((d, row))
-        stop_timing()
         results.sort(key=lambda t: t[0])
         return [r for _, r in results]
 
@@ -176,7 +178,6 @@ class RTreeAdapter:
             query_box = (x, y, x, y)
             qpt = (x, y)
         out: List[Tuple[float, Dict[str, Any]]] = []
-        start_timing()
         try:
             for _id in self.idx.nearest(query_box, num_results=k):
                 count_read()
@@ -190,7 +191,6 @@ class RTreeAdapter:
                 out.append((d, row))
         except Exception:
             return []
-        stop_timing()
         out.sort(key=lambda t: t[0])
         return [r for _, r in out]
 
@@ -205,3 +205,4 @@ class RTreeAdapter:
 
     def close(self):
         self._save_meta()
+        count_write(os.path.getsize(self.meta_path))
