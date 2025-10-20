@@ -1,7 +1,7 @@
 # backend/src/app.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routes import router as api_router
+from src.routes import router as api_router
 
 app = FastAPI(title="Mini SGBD 3D", version="1.0.0")
 

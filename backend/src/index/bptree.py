@@ -6,7 +6,7 @@ import os, struct, bisect, pickle, sys
 
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from core.schema import Schema, Kind
+from src.core.schema import Schema, Kind
 
 
 PAGE_SIZE   = 4096

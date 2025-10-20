@@ -3,18 +3,18 @@ import os, csv
 from typing import Any, Dict, List, Iterable, Optional, Tuple
 from dataclasses import dataclass
 
-from core.schema import Schema, Field, Kind
-from parser_sql import (
+from src.core.schema import Schema, Field, Kind
+from src.parser_sql import (
     ParserSQL, CreateTableStatement, SelectStatement,
     InsertStatement, DeleteStatement, IndexType, DataType, Column
 )
-from catalog import Catalog
+from src.catalog import Catalog
 
-from index.isam import ISAMFile
-from index.sequential import SequentialOrderedFile
-from index.ext_hash import ExtendibleHashing
-from index.rtree_adapter import RTreeAdapter
-from index.bptree import BPlusClusteredFile
+from src.index.isam import ISAMFile
+from src.index.sequential import SequentialOrderedFile
+from src.index.ext_hash import ExtendibleHashing
+from src.index.rtree_adapter import RTreeAdapter
+from src.index.bptree import BPlusClusteredFile
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 OUT_DIR = os.path.join(ROOT, "out")

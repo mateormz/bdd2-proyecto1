@@ -8,7 +8,7 @@ from rtree import index as rtree_index
 import struct
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from core.schema import Schema, Kind  # opcional para coercear filas
+from src.core.schema import Schema, Kind  # opcional para coercear filas
 
 
 def _to_float(v: Any) -> float:

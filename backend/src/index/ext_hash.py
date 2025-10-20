@@ -4,7 +4,7 @@ import struct
 from typing import Any, Dict, List, Optional
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from core.schema import Schema, Field, Kind
+from src.core.schema import Schema, Field, Kind
 
 DEFAULT_D = 8
 BLOCK_FACTOR = 32

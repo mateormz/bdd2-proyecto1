@@ -5,8 +5,8 @@ from typing import List, Dict, Any, Optional
 import os
 import time
 
-from engine import Engine
-from parser_sql import IndexType
+from src.engine import Engine
+from src.parser_sql import IndexType
 
 eng = Engine()
 

@@ -1,18 +1,15 @@
 services:
   frontend:
     build:
-      context: ./frontend
+      context: ./active_frontend_to_use_bdII
       dockerfile: Dockerfile
     container_name: cs2702-frontend
     working_dir: /app
     ports:
       - "5173:5173"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
     environment:
       - NODE_ENV=development
-    command: ["npm", "run", "dev", "--", "--host"]
+    command: ["npm","run","dev","--","--host","0.0.0.0"]
 
   backend:
     build:

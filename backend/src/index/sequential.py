@@ -3,7 +3,7 @@ import os, math, bisect, pickle, struct
 from typing import Any, Dict, List, Iterable, Callable, Tuple
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from core.schema import Schema, Field, Kind
+from src.core.schema import Schema, Field, Kind
 
 PAGE_SIZE = 4096
 PAGE_HEADER_FMT = "<ii"
