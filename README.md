@@ -1,4 +1,3 @@
-````markdown
 # BD2 — Proyecto 1
 **Organización e Indexación Eficiente de Archivos con Datos Tabulares y Espaciales**
 
