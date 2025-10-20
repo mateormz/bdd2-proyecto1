@@ -1,92 +1,257 @@
-import math
-import pickle
-import csv
-import _csv
-import os
-import heapq
-import time
-from collections import deque
-from rtree import index
+from __future__ import annotations
+import os, math, pickle, time, struct, sys
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+from rtree import index as rtree_index
 
-class IOCounter:
-    def __init__(self):
-        self.reads = 0
-        self.writes = 0 
-        self.read_bytes = 0
-        self.write_bytes = 0
-        self.start_time = None
-        self.total_time_ms = 0.0
-    
-    def count_read(self, bytes_count=0):
-        self.reads += 1
-        self.read_bytes += bytes_count
-    
-    def count_write(self, bytes_count=0):
-        self.writes += 1
-        self.write_bytes += bytes_count
-    
-    def start_timing(self):
-        self.start_time = time.time()
-    
-    def stop_timing(self):
-        if self.start_time:
-            self.total_time_ms = (time.time() - self.start_time) * 1000
-            self.start_time = None
-    
-    def reset(self):
-        self.reads = 0
-        self.writes = 0
-        self.read_bytes = 0
-        self.write_bytes = 0
-        self.total_time_ms = 0.0
-        self.start_time = None
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from core.schema import Schema, Kind
 
-_counter = IOCounter()
+reads = 0
+writes = 0
+read_bytes = 0
+write_bytes = 0
+start_time = None
+total_time_ms = 0.0
 
 def count_read(bytes_count=0):
-    _counter.count_read(bytes_count)
+    global reads, read_bytes
+    reads += 1
+    read_bytes += bytes_count
 
 def count_write(bytes_count=0):
-    _counter.count_write(bytes_count)
+    global writes, write_bytes
+    writes += 1
+    write_bytes += bytes_count
 
-OUT_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'out', 'rtree_index')
+def start_timing():
+    global start_time
+    start_time = time.time()
+
+def stop_timing():
+    global total_time_ms, start_time
+    if start_time:
+        total_time_ms = (time.time() - start_time) * 1000
+        start_time = None
+
+def reset_counters():
+    global reads, writes, read_bytes, write_bytes, total_time_ms, start_time
+    reads = writes = read_bytes = write_bytes = 0
+    total_time_ms = 0.0
+    start_time = None
+
+def show_report(title="Reporte I/O Global"):
+    total_ops = reads + writes
+    print(f"\n{title}")
+    print("="*40)
+    print(f"Lecturas: {reads}")
+    print(f"Escrituras: {writes}")
+    print(f"Total operaciones: {total_ops}")
+    print(f"Tiempo: {total_time_ms:.2f} ms")
+    if total_ops > 0:
+        print(f"Promedio: {total_time_ms/total_ops:.2f} ms/op")
+    print("="*40)
+
+def get_counters():
+    return {
+        'reads': reads,
+        'writes': writes,
+        'read_bytes': read_bytes,
+        'write_bytes': write_bytes,
+        'total_time_ms': total_time_ms
+    }
+
+def _to_float(v: Any) -> float:
+    try: return float(v)
+    except Exception: return 0.0
+
+def _euclid(p: Sequence[float], q: Sequence[float]) -> float:
+    if len(p) == 3 and len(q) == 3:
+        return math.sqrt((p[0]-q[0])**2+(p[1]-q[1])**2+(p[2]-q[2])**2)
+    return math.sqrt((p[0]-q[0])**2+(p[1]-q[1])**2)
+
+def _bbox_from_point(pt: Sequence[float]) -> Tuple[float, ...]:
+    if len(pt) == 3:
+        x, y, z = pt
+        return (x, y, z, x, y, z)
+    x, y = pt[:2]
+    return (x, y, x, y)
 
 class RTreeAdapter:
-    def __init__(self, path=OUT_PATH):
-        p = index.Property()
-        p.storage = index.RT_Disk
-        p.index_type = index.RT_RTree
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.path = path
-        self.idx = index.Index(path, properties=p)
+    def __init__(self, base_path: str):
+        self.base_path = base_path
+        os.makedirs(os.path.dirname(base_path), exist_ok=True)
+        self.meta_path = f"{self.base_path}.pkl"
+        self.idx: Optional[rtree_index.Index] = None
+        self.meta: Dict[str, Any] = {"dimension": 2, "next_id": 1, "label_to_ids": {}, "id_to_payload": {}}
+        if os.path.exists(self.meta_path):
+            try:
+                with open(self.meta_path, "rb") as f:
+                    count_read(os.path.getsize(self.meta_path))
+                    self.meta = pickle.load(f)
+            except Exception:
+                self._reset_meta()
+        self._open_index(self.meta["dimension"])
 
-    def add(self, point, payload_id):
-        x, y = point
-        self.idx.insert(payload_id, (x, y, x, y))
-        count_write()
+    def _reset_meta(self, dimension: int = 2):
+        self.meta = {"dimension": int(dimension), "next_id": 1, "label_to_ids": {}, "id_to_payload": {}}
+        self._save_meta()
 
-    def remove(self, point, payload_id):
-        x, y = point
-        self.idx.delete(payload_id, (x, y, x, y))
-        count_write()
+    def _save_meta(self):
+        with open(self.meta_path, "wb") as f:
+            pickle.dump(self.meta, f, protocol=pickle.HIGHEST_PROTOCOL)
+            count_write(os.path.getsize(self.meta_path))
 
-    def rangeSearch(self, point, radio):
-        x, y = point
-        count_read()
-        results = []
-        candidates = self.idx.intersection((x - radio, y - radio, x + radio, y + radio), objects=True)
-        for c in candidates:
-            count_read()
-            px, py = (c.bbox[0], c.bbox[1])
-            dist = math.sqrt((px - x) ** 2 + (py - y) ** 2)
-            if dist <= radio:
-                results.append({"id": c.id, "x": px, "y": py, "dist": round(dist, 4)})
-        results.sort(key=lambda r: r["dist"])
-        return results
+    def _delete_index_files_only(self):
+        for ext in (".dat", ".idx"):
+            path = f"{self.base_path}{ext}"
+            if os.path.exists(path):
+                try: os.remove(path)
+                except Exception: pass
 
-    def kNN(self, point, k):
-        x, y = point
-        count_read()
-        res = list(self.idx.nearest((x, y, x, y), num_results=k))
-        count_read(len(res))
-        return res
+    def _open_index(self, dimension: int):
+        p = rtree_index.Property()
+        p.storage = rtree_index.RT_Disk
+        p.index_type = rtree_index.RT_RTree
+        p.dimension = int(dimension)
+        self.idx = rtree_index.Index(self.base_path, properties=p)
+
+    def _rebuild_index(self, new_dimension: int):
+        self._delete_index_files_only()
+        self._open_index(new_dimension)
+        old_payloads = list(self.meta["id_to_payload"].items())
+        self.meta["dimension"] = int(new_dimension)
+        for _id, payload in old_payloads:
+            pt = tuple(payload["point"])
+            self.idx.insert(int(_id), _bbox_from_point(pt))
+        self._save_meta()
+
+    def _ensure_dimension(self, want_dim: int):
+        if int(self.meta["dimension"]) != int(want_dim):
+            self._rebuild_index(want_dim)
+
+    def build_from_csv(self, rows: List[Dict[str, Any]], x_field: str, y_field: str, z_field: Optional[str] = None, label_field: Optional[str] = None, schema: Optional[Schema] = None):
+        dim = 3 if z_field else 2
+        self._reset_meta(dim)
+        self._delete_index_files_only()
+        self._open_index(dim)
+        start_timing()
+        for row in rows:
+            self.add(row, x_field, y_field, z_field=z_field, label_field=label_field, schema=schema)
+        stop_timing()
+
+    def add(self, row: Dict[str, Any], x_field: str, y_field: str, z_field: Optional[str] = None, label_field: Optional[str] = None, schema: Optional[Schema] = None):
+        if schema is not None:
+            row = schema.coerce_row(row)
+        x = _to_float(row.get(x_field))
+        y = _to_float(row.get(y_field))
+        if z_field:
+            z = _to_float(row.get(z_field))
+            pt = (x, y, z); want_dim = 3
+        else:
+            pt = (x, y); want_dim = 2
+        self._ensure_dimension(want_dim)
+        label_str = str(row.get(label_field, row.get("id", "")))
+        _id = int(self.meta["next_id"])
+        self.meta["next_id"] = _id + 1
+        self.idx.insert(_id, _bbox_from_point(pt))
+        self.meta["id_to_payload"][_id] = {"point": pt, "row": dict(row), "label": label_str}
+        self.meta["label_to_ids"].setdefault(label_str, []).append(_id)
+        self._save_meta()
+
+    def remove_by_label(self, label: Any) -> int:
+        label_str = str(label)
+        ids = self.meta["label_to_ids"].get(label_str, [])
+        removed = 0
+        for _id in list(ids):
+            payload = self.meta["id_to_payload"].get(_id)
+            if not payload: continue
+            pt = tuple(payload["point"])
+            try:
+                self.idx.delete(int(_id), _bbox_from_point(pt))
+                removed += 1
+            except Exception: pass
+            self.meta["id_to_payload"].pop(_id, None)
+            try: self.meta["label_to_ids"][label_str].remove(_id)
+            except ValueError: pass
+        if self.meta["label_to_ids"].get(label_str) == []:
+            self.meta["label_to_ids"].pop(label_str, None)
+        if removed > 0:
+            self._save_meta()
+        return removed
+
+    def search_by_label(self, label: Any) -> List[Dict[str, Any]]:
+        label_str = str(label)
+        out: List[Dict[str, Any]] = []
+        for _id in self.meta["label_to_ids"].get(label_str, []):
+            payload = self.meta["id_to_payload"].get(_id)
+            if payload: out.append(dict(payload["row"]))
+        return out
+
+    def range(self, point: Sequence[float], radius: float) -> List[Dict[str, Any]]:
+        dim = int(self.meta["dimension"])
+        if dim == 3:
+            x, y, z = float(point[0]), float(point[1]), float(point[2])
+            query_box = (x-radius, y-radius, z-radius, x+radius, y+radius, z+radius)
+            qpt = (x, y, z)
+        else:
+            x, y = float(point[0]), float(point[1])
+            query_box = (x-radius, y-radius, x+radius, y+radius)
+            qpt = (x, y)
+        results: List[Tuple[float, Dict[str, Any]]] = []
+        start_timing()
+        for obj in self.idx.intersection(query_box, objects=True):
+            count_read(1)
+            _id = int(obj.id)
+            payload = self.meta["id_to_payload"].get(_id)
+            if not payload: continue
+            ppt = tuple(payload["point"])
+            d = _euclid(qpt, ppt)
+            if d <= radius:
+                row = dict(payload["row"])
+                row["_distance"] = float(round(d, 6))
+                results.append((d, row))
+        stop_timing()
+        results.sort(key=lambda t: t[0])
+        return [r for _, r in results]
+
+    def knn(self, point: Sequence[float], k: int) -> List[Dict[str, Any]]:
+        dim = int(self.meta["dimension"])
+        k = max(1, int(k))
+        if dim == 3:
+            x, y, z = float(point[0]), float(point[1]), float(point[2])
+            query_box = (x, y, z, x, y, z)
+            qpt = (x, y, z)
+        else:
+            x, y = float(point[0]), float(point[1])
+            query_box = (x, y, x, y)
+            qpt = (x, y)
+        out: List[Tuple[float, Dict[str, Any]]] = []
+        start_timing()
+        try:
+            for _id in self.idx.nearest(query_box, num_results=k):
+                count_read(1)
+                _id = int(_id)
+                payload = self.meta["id_to_payload"].get(_id)
+                if not payload: continue
+                ppt = tuple(payload["point"])
+                d = _euclid(qpt, ppt)
+                row = dict(payload["row"])
+                row["_distance"] = float(round(d, 6))
+                out.append((d, row))
+        except Exception:
+            return []
+        stop_timing()
+        out.sort(key=lambda t: t[0])
+        return [r for _, r in out]
+
+    def count(self) -> int:
+        return len(self.meta["id_to_payload"])
+
+    def dimension(self) -> int:
+        return int(self.meta["dimension"])
+
+    def labels(self) -> List[str]:
+        return list(self.meta["label_to_ids"].keys())
+
+    def close(self):
+        self._save_meta()
