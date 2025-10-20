@@ -1,76 +1,73 @@
 import struct
 import os
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'core'))
+from schema import Schema, Field, Kind
 
 D = 2
 MAX_CHAINING = 1
 BLOCK_FACTOR = 3
-
-class Record:
-    FORMAT = 'i20s'
-    SIZE_OF_RECORD = struct.calcsize(FORMAT)
-    
-    def __init__(self, key, value):
-        self.key = key
-        self.value = value
-
-    def pack(self):
-        return struct.pack(Record.FORMAT, self.key, self.value.encode())
-
-    @staticmethod
-    def unpack(data):
-        key, value = struct.unpack(Record.FORMAT, data)
-        return Record(key, value.decode().rstrip('\x00'))
     
 class Bucket:
-    BUCKET_SIZE = (BLOCK_FACTOR * Record.SIZE_OF_RECORD) + 4
-
-    def __init__(self, records=[], next_bucket=-1):
+    def __init__(self, records=[], next_bucket=-1, schema=None):
         self.records = records
         self.next_bucket = next_bucket
+        self.schema = schema
+        self.record_size = schema.size if schema else 0
+        self.bucket_size = (BLOCK_FACTOR * self.record_size) + 4
 
     def pack(self):
         records_data = b''
 
         for record in self.records:
-            records_data += record.pack()
+            records_data += self.schema.pack(record)
         
-        i = len(self.records)
-        while i < BLOCK_FACTOR:
-            records_data += b'\x00' * Record.SIZE_OF_RECORD
-            i += 1
-
+        remaining_slots = BLOCK_FACTOR - len(self.records)
+        records_data += b'\x00' * (remaining_slots * self.record_size)    
         next_bucket_data = struct.pack('i', self.next_bucket)
         return records_data + next_bucket_data
 
     @staticmethod
-    def unpack(data: bytes):
-        if len(data) < Bucket.BUCKET_SIZE:
-            data = data.ljust(Bucket.BUCKET_SIZE, b'\x00')
+    def unpack(data: bytes, schema):
+        record_size = schema.size
+        bucket_size = (BLOCK_FACTOR * record_size) + 4
+
+        if len(data) < bucket_size:
+            data = data.ljust(bucket_size, b'\x00')
         
         records = []
 
         for i in range(BLOCK_FACTOR):
-            offset = i * Record.SIZE_OF_RECORD
-            record_data = data[offset:offset + Record.SIZE_OF_RECORD]
+            offset = i * record_size
+            record_data = data[offset:offset + record_size]
             
-            if record_data != b'\x00' * Record.SIZE_OF_RECORD:
-                record = Record.unpack(record_data)
-                if record.key != 0 or record.value.strip():
-                    records.append(record)
+            if record_data != b'\x00' * record_size:
+                record_dict = schema.unpack(record_data)
+                if any(str(v).strip() for v in record_dict.values() if v):
+                    records.append(record_dict)
                 
-        records_section_size = BLOCK_FACTOR * Record.SIZE_OF_RECORD
+        records_section_size = BLOCK_FACTOR * record_size
         next_bucket_data = data[records_section_size:records_section_size + 4]
         next_bucket = struct.unpack('i', next_bucket_data)[0]
         
-        return Bucket(records, next_bucket)
+        return Bucket(records, next_bucket, schema)
 
 class ExtendibleHashing:
-    def __init__(self, filename: str):
-        self.filename = "../out/ext_hash.dat" + filename
+    def __init__(self, filename: str, schema: Schema, key_field: str, hash_function=None):
+        out_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'out'))
+        os.makedirs(out_dir, exist_ok=True)
+        
+        if not filename.endswith('.dat'):
+            filename = filename + '.dat'
+        self.filename = os.path.join(out_dir, filename)
+        
+        self.schema = schema
+        self.key_field = key_field
+        self.hash_function = hash_function or self._default_hash
         global D
         
-        if not os.path.exists(filename):
-            with open(filename, 'w+b') as f:
+        if not os.path.exists(self.filename):
+            with open(self.filename, 'w+b') as f:
                 pass
             D = 2
             self._init_buckets()
@@ -79,6 +76,14 @@ class ExtendibleHashing:
             if D == 0:
                 D = 2
                 self._init_buckets()
+    
+    def _default_hash(self, key):
+        if isinstance(key, int) or isinstance(key, float):
+            return key % (2 ** D)
+        elif isinstance(key, str):
+            return hash(key) % (2 ** D)
+        else:
+            return hash(str(key)) % (2 ** D)
         
     def _read_global_depth(self):
         try:
@@ -95,29 +100,31 @@ class ExtendibleHashing:
             f.write(struct.pack('i', D))
             
             for i in range(2 ** D):
-                f.write(Bucket([], -1).pack())
+                f.write(Bucket([], -1, self.schema).pack())
     
-    def get_bucket_index(self, key: int):
-        return key % (2 ** D)
+    def get_bucket_index(self, key):
+        return self.hash_function(key)
 
     def read_bucket(self, bucket_index):
         with open(self.filename, 'rb') as f:
-            offset = 4 + (bucket_index * Bucket.BUCKET_SIZE)
+            bucket_size = self.schema.size * BLOCK_FACTOR + 4
+            offset = 4 + (bucket_index * bucket_size)
             f.seek(offset)
-            data = f.read(Bucket.BUCKET_SIZE)
+            data = f.read(bucket_size)
             
-            if len(data) < Bucket.BUCKET_SIZE:
-                return Bucket([], -1)
+            if len(data) < bucket_size:
+                return Bucket([], -1, self.schema)
                 
-            return Bucket.unpack(data)
+            return Bucket.unpack(data, self.schema)
     
     def write_bucket(self, bucket_index, bucket):
         with open(self.filename, 'r+b') as f:
-            offset = 4 + (bucket_index * Bucket.BUCKET_SIZE)
+            bucket_size = self.schema.size * BLOCK_FACTOR + 4
+            offset = 4 + (bucket_index * bucket_size)
             
             f.seek(0, 2)
-            if offset + Bucket.BUCKET_SIZE > f.tell():
-                f.write(b'\x00' * (offset + Bucket.BUCKET_SIZE - f.tell()))
+            if offset + bucket_size > f.tell():
+                f.write(b'\x00' * (offset + bucket_size - f.tell()))
             
             f.seek(offset)
             f.write(bucket.pack())
@@ -125,7 +132,8 @@ class ExtendibleHashing:
     def _find_available_bucket_position(self):
         with open(self.filename, 'r+b') as f:
             f.seek(0, 2)
-            return (f.tell() - 4) // Bucket.BUCKET_SIZE
+            bucket_size = self.schema.size * BLOCK_FACTOR + 4
+            return (f.tell() - 4) // bucket_size
     
     def get_chain_length(self, bucket_index):
         current_bucket = self.read_bucket(bucket_index)
@@ -149,9 +157,8 @@ class ExtendibleHashing:
         current_bucket.next_bucket = new_bucket_index
         self.write_bucket(current_index, current_bucket)
         
-        with open(self.filename, 'r+b') as f:
-            f.seek(0, 2)
-            f.write(Bucket([record], -1).pack())
+        new_bucket = Bucket([record], -1, self.schema)
+        self.write_bucket(new_bucket_index, new_bucket)
     
     def increment_global_depth(self):
         global D
@@ -169,14 +176,13 @@ class ExtendibleHashing:
             file_size = f.tell()
             f.seek(4)
             
-            while f.tell() + Bucket.BUCKET_SIZE <= file_size:
-                bucket_data = f.read(Bucket.BUCKET_SIZE)
-                if len(bucket_data) == Bucket.BUCKET_SIZE:
-                    bucket = Bucket.unpack(bucket_data)
+            bucket_size = self.schema.size * BLOCK_FACTOR + 4
+            while f.tell() + bucket_size <= file_size:
+                bucket_data = f.read(bucket_size)
+                if len(bucket_data) == bucket_size:
+                    bucket = Bucket.unpack(bucket_data, self.schema)
                     for record in bucket.records:
-                        if (record.key is not None and 
-                            record.value is not None and 
-                            str(record.value).strip() != ''):
+                        if record.get(self.key_field) is not None:
                             all_records.append(record)
         
         self.increment_global_depth()
@@ -186,13 +192,14 @@ class ExtendibleHashing:
             f.write(struct.pack('i', new_d))
             
             for i in range(2 ** new_d):
-                f.write(Bucket([], -1).pack())
+                f.write(Bucket([], -1, self.schema).pack())
         
         for record in all_records:
             self._simple_insert(record)
     
     def _simple_insert(self, record):
-        bucket_index = self.get_bucket_index(record.key)
+        key_value = record.get(self.key_field)
+        bucket_index = self.get_bucket_index(key_value)
         bucket = self.read_bucket(bucket_index)
         
         if len(bucket.records) < BLOCK_FACTOR:
@@ -201,10 +208,11 @@ class ExtendibleHashing:
         else:
             self.add_overflow_bucket(bucket_index, record)
 
-    def insert(self, record: Record):
-        bucket_index = self.get_bucket_index(record.key)
+    def insert(self, record):
+        key_value = record.get(self.key_field)
+        bucket_index = self.get_bucket_index(key_value)
         
-        existing = self.search(record.key)
+        existing = self.search(key_value)
         if existing:
             return
         
@@ -227,14 +235,14 @@ class ExtendibleHashing:
         bucket = self.read_bucket(bucket_index)
         
         for record in bucket.records:
-            if record.key == key:
+            if record.get(self.key_field) == key:
                 return record
         
         current_bucket = bucket
         while current_bucket.next_bucket != -1:
             current_bucket = self.read_bucket(current_bucket.next_bucket)
             for record in current_bucket.records:
-                if record.key == key:
+                if record.get(self.key_field) == key:
                     return record
         
         return None
@@ -244,7 +252,7 @@ class ExtendibleHashing:
         bucket = self.read_bucket(bucket_index)
         
         for i, record in enumerate(bucket.records):
-            if record.key == key:
+            if record.get(self.key_field) == key:
                 del bucket.records[i]
                 self.write_bucket(bucket_index, bucket)
                 return True
@@ -254,7 +262,7 @@ class ExtendibleHashing:
             next_index = current_bucket.next_bucket
             current_bucket = self.read_bucket(next_index)
             for i, record in enumerate(current_bucket.records):
-                if record.key == key:
+                if record.get(self.key_field) == key:
                     del current_bucket.records[i]
                     self.write_bucket(next_index, current_bucket)
                     return True
