@@ -6,6 +6,9 @@ import os
 import heapq
 from collections import deque
 from rtree import index
+
+from io_counters import IOCounter, count_read, count_write
+
 OUT_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'out', 'rtree_index')
 
 class RTreeAdapter:
@@ -16,19 +19,26 @@ class RTreeAdapter:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.path = path
         self.idx = index.Index(path, properties=p)
+        self.io_counter = IOCounter()
 
     def add(self, point, payload_id):
         x, y = point
         self.idx.insert(payload_id, (x, y, x, y))
+        self.io_counter.count_write(16)
+        count_write(16)
 
     def remove(self, point, payload_id):
         x, y = point
         self.idx.delete(payload_id, (x, y, x, y))
+        self.io_counter.count_write(16)
+        count_write(16)
 
     def rangeSearch(self, point, radio):
         x, y = point
         results = []
         candidates = self.idx.intersection((x - radio, y - radio, x + radio, y + radio), objects=True)
+        self.io_counter.count_read(64)
+        count_read(64)
         for c in candidates:
             px, py = (c.bbox[0], c.bbox[1])
             dist = math.sqrt((px - x) ** 2 + (py - y) ** 2)

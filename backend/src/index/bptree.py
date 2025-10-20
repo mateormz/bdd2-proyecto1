@@ -13,6 +13,7 @@ from typing import Any, Iterable, List, Optional, Tuple
 import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from core.schema import Schema, Field, Kind
+from io_counters import IOCounter, count_read, count_write
 #from ..core.schema import Schema, Field, Kind
 #from core.schema import Schema, Field, Kind
 
@@ -66,6 +67,7 @@ class BPlusTree:
         self.leaf_capacity = leaf_capacity
         self.internal_fanout = internal_fanout
         self.root: Optional[BPTNode] = None
+        self.io_counter = IOCounter()
 
     def bulk_load(self, sorted_items: Iterable[Tuple[Any, int]]):
         leaves: List[BPTNode] = []
@@ -148,6 +150,7 @@ class ClusteredIndexFile:
         self.key_field = key_field
         self.key_kind = key_kind
         self.tree = BPlusTree(key_kind, leaf_capacity=leaf_cap, internal_fanout=fanout)
+        self.io_counter = IOCounter()
 
 
     def _count_records(self) -> int:
@@ -198,7 +201,10 @@ class ClusteredIndexFile:
         os.makedirs(os.path.dirname(self.data_path), exist_ok=True)
         with open(self.data_path, 'wb') as binf:
             for _, row in rows:
-                binf.write(self.schema.pack(row))
+                data = self.schema.pack(row)
+                binf.write(data)
+                self.io_counter.count_write(len(data))
+                count_write(len(data))
 
         self._rebuild_index()
 
@@ -233,7 +239,10 @@ class ClusteredIndexFile:
         with open(self.data_path, 'rb') as f:
             for off in offsets:
                 f.seek(off)
-                out.append(self.schema.unpack(f.read(self.schema.size)))
+                data = f.read(self.schema.size)
+                self.io_counter.count_read(len(data))
+                count_read(len(data))
+                out.append(self.schema.unpack(data))
         return out
 
     def search(self, key_text: str) -> List[dict]:

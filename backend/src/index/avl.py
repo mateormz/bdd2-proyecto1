@@ -2,6 +2,8 @@ from __future__ import annotations
 import os, io, struct, csv
 from typing import Dict, Any, List, Tuple, Optional
 
+from io_counters import IOCounter, count_read, count_write
+
 def _sfix(text: str, n: int) -> bytes:
     b = str(text).encode('utf-8', errors='ignore')[:n]
     return b + b'\x00' * (n - len(b))
@@ -222,45 +224,66 @@ def _insert(idx: IndexFile, off: int, key: int, value_off: int) -> int:
         idx.write_node(off, k, h, l, new_r, v)
     return _rebalance(idx, off)
 
-def _search(idx: IndexFile, off: int, key: int, out: List[int]):
+def _search(idx: IndexFile, off: int, key: int, out: List[int], io_counter: IOCounter):
     if not off: return
     k, h, l, r, v = idx.read_node(off)
-    if key < k: _search(idx, l, key, out)
-    elif key > k: _search(idx, r, key, out)
+    io_counter.count_read(_NODE_SIZE)
+    count_read(_NODE_SIZE)
+    if key < k: _search(idx, l, key, out, io_counter)
+    elif key > k: _search(idx, r, key, out, io_counter)
     else:
         out.append(v)
-        _search(idx, l, key, out)
-        _search(idx, r, key, out)
+        _search(idx, l, key, out, io_counter)
+        _search(idx, r, key, out, io_counter)
 
-def _range(idx: IndexFile, off: int, lo: int, hi: int, out: List[int]):
+def _range(idx: IndexFile, off: int, lo: int, hi: int, out: List[int], io_counter: IOCounter):
     if not off: return
     k, h, l, r, v = idx.read_node(off)
-    if lo < k: _range(idx, l, lo, hi, out)
+    io_counter.count_read(_NODE_SIZE)
+    count_read(_NODE_SIZE)
+    if lo < k: _range(idx, l, lo, hi, out, io_counter)
     if lo <= k <= hi: out.append(v)
-    if k < hi: _range(idx, r, lo, hi, out)
+    if k < hi: _range(idx, r, lo, hi, out, io_counter)
 
 class AVLFile:
     def __init__(self, data_path: str, index_path: str, create: bool = False):
         self.codec = EmployeeCodec()
         self.data = DataFile(data_path, self.codec.record_size(), create)
         self.index = IndexFile(index_path, create)
+        self.io_counter = IOCounter()
 
     def add(self, row: Dict[str, Any]) -> None:
         packed = self.codec.pack(row)
         data_off = self.data.append(packed)
+        self.io_counter.count_write(len(packed))
+        count_write(len(packed))
         key = self.codec.key_of(row)
         new_root = _insert(self.index, self.index.root_off, key, data_off)
         self.index._write_header(root_off=new_root, count=self.index.count + 1)
+        self.io_counter.count_write(16)
+        count_write(16)
 
     def search(self, key: int) -> List[Dict[str, Any]]:
         offs: List[int] = []
-        _search(self.index, self.index.root_off, key, offs)
-        return [self.codec.unpack(self.data.read_at(off)) for off in offs]
+        _search(self.index, self.index.root_off, key, offs, self.io_counter)
+        results = []
+        for off in offs:
+            data = self.data.read_at(off)
+            self.io_counter.count_read(len(data))
+            count_read(len(data))
+            results.append(self.codec.unpack(data))
+        return results
 
     def rangeSearch(self, lo: int, hi: int) -> List[Dict[str, Any]]:
         offs: List[int] = []
-        _range(self.index, self.index.root_off, lo, hi, offs)
-        return [self.codec.unpack(self.data.read_at(off)) for off in offs]
+        _range(self.index, self.index.root_off, lo, hi, offs, self.io_counter)
+        results = []
+        for off in offs:
+            data = self.data.read_at(off)
+            self.io_counter.count_read(len(data))
+            count_read(len(data))
+            results.append(self.codec.unpack(data))
+        return results
 
     def io_stats(self) -> Dict[str, int]:
         return {

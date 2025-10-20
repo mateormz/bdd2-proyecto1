@@ -1,5 +1,6 @@
 import struct, os, csv
 from core.schema import Schema, Field, Kind
+from io_counters import IOCounter, count_read, count_write
 
 def _project_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -114,6 +115,7 @@ class ISAMFile:
         self.schema = schema
         self.key_field = key_field
         self.page_size = DataPage.HEADER_SIZE + BLOCK_FACTOR * schema.size
+        self.io_counter = IOCounter()
 
     def build_from_csv(self, csv_path: str, delimiter: str = ','):
         """Construye el ISAM de 3 niveles a partir de un CSV"""
@@ -144,7 +146,10 @@ class ISAMFile:
             for start in range(0, len(rows), BLOCK_FACTOR):
                 chunk = rows[start:start + BLOCK_FACTOR]
                 page = DataPage(self.schema, chunk, next_overflow=-1)
-                f.write(page.pack())
+                data = page.pack()
+                f.write(data)
+                self.io_counter.count_write(len(data))
+                count_write(len(data))
                 first_keys_level0.append(int(chunk[0][self.key_field]))
 
         num_data_pages = len(first_keys_level0)
@@ -166,7 +171,10 @@ class ISAMFile:
                 node_pointers = list(range(start, end))
                 
                 node = IndexNode(keys=node_keys, pointers=node_pointers)
-                f.write(node.pack())
+                data = node.pack()
+                f.write(data)
+                self.io_counter.count_write(len(data))
+                count_write(len(data))
                 
                 # Guardar el primer key de este nodo para el nivel 2
                 first_keys_level1.append(chunk_keys[0])
@@ -182,7 +190,10 @@ class ISAMFile:
         
         root = IndexNode(keys=root_keys, pointers=root_pointers)
         with open(self.filename_idx2, 'wb') as f:
-            f.write(root.pack())
+            data = root.pack()
+            f.write(data)
+            self.io_counter.count_write(len(data))
+            count_write(len(data))
         
         print(f"Nivel 2: Nodo root creado con {len(root_keys)} keys")
 
@@ -192,6 +203,8 @@ class ISAMFile:
             return None
         with open(self.filename_idx2, 'rb') as f:
             raw = f.read(IndexNode.SIZE_OF_NODE)
+            self.io_counter.count_read(len(raw))
+            count_read(len(raw))
         return IndexNode.unpack(raw)
 
     def _read_level1_node(self, node_idx: int) -> IndexNode:
@@ -199,6 +212,8 @@ class ISAMFile:
         with open(self.filename_idx1, 'rb') as f:
             f.seek(node_idx * IndexNode.SIZE_OF_NODE)
             raw = f.read(IndexNode.SIZE_OF_NODE)
+            self.io_counter.count_read(len(raw))
+            count_read(len(raw))
         return IndexNode.unpack(raw)
 
     def _read_data_page(self, page_idx: int) -> DataPage:
@@ -206,6 +221,8 @@ class ISAMFile:
         with open(self.filename, 'rb') as f:
             f.seek(page_idx * self.page_size)
             data = f.read(self.page_size)
+            self.io_counter.count_read(len(data))
+            count_read(len(data))
         page = DataPage(self.schema)
         return page.unpack(data)
 
@@ -213,7 +230,10 @@ class ISAMFile:
         """Escribe una página de datos"""
         with open(self.filename, 'r+b') as f:
             f.seek(page_idx * self.page_size)
-            f.write(page.pack())
+            data = page.pack()
+            f.write(data)
+            self.io_counter.count_write(len(data))
+            count_write(len(data))
 
     def _append_overflow_page(self, page: DataPage) -> int:
         """Añade una overflow page al final del archivo de datos"""
@@ -221,7 +241,10 @@ class ISAMFile:
             f.seek(0, os.SEEK_END)
             size = f.tell()
             new_index = size // self.page_size
-            f.write(page.pack())
+            data = page.pack()
+            f.write(data)
+            self.io_counter.count_write(len(data))
+            count_write(len(data))
         return new_index
 
     def _locate_data_page(self, key_value: int) -> int:
@@ -423,6 +446,8 @@ class ISAMFile:
             f.seek(0, os.SEEK_SET)
             for pidx in range(n_pages):
                 page_data = f.read(self.page_size)
+                self.io_counter.count_read(len(page_data))
+                count_read(len(page_data))
                 page = DataPage(self.schema)
                 page = page.unpack(page_data)
                 actives = [r for r in page.records if r.get(self.schema.deleted_name, 0) == 0]
@@ -450,6 +475,8 @@ class ISAMFile:
             f.seek(0, os.SEEK_SET)
             for i in range(n_nodes):
                 raw = f.read(IndexNode.SIZE_OF_NODE)
+                self.io_counter.count_read(len(raw))
+                count_read(len(raw))
                 node = IndexNode.unpack(raw)
                 print(f"Node {i}: keys={node.keys}, ptrs={node.pointers} (apuntan a páginas de datos)")
 
