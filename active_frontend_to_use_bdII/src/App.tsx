@@ -313,7 +313,6 @@ export default function App() {
             <div className="kpi small">writes: {m?.writes ?? 0}</div>
             <div className="kpi small">read_bytes: {m?.read_bytes ?? 0}</div>
             <div className="kpi small">write_bytes: {m?.write_bytes ?? 0}</div>
-            <div className="kpi small">io_time: {fmtMs(m?.total_time_ms)}</div>
           </div>
           <ResultTable rows={result?.rows} />
           {result?.message && (
