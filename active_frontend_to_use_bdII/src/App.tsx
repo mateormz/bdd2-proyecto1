@@ -23,7 +23,7 @@ export default function App() {
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvUploadedPath, setCsvUploadedPath] = useState("");
   const [tableName, setTableName] = useState("Inventory3D");
-  const [indexType, setIndexType] = useState<"SEQUENTIAL" | "ISAM" | "EXTHASH" | "BPTREE" | "RTREE">("RTREE");
+  const [indexType, setIndexType] = useState<"SEQUENTIAL" | "ISAM" | "EXTHASH" | "BPTREE_CLUSTERED" | "RTREE">("RTREE");
   const [keyColumn, setKeyColumn] = useState("id");
   const [colX, setColX] = useState("x");
   const [colY, setColY] = useState("y");
@@ -147,6 +147,9 @@ export default function App() {
     }
   }
 
+  // === NUEVO: referencia local a métricas de I/O ===
+  const m = (result as any)?.metrics;
+
   return (
     <div className="app">
       {/* SIDEBAR */}
@@ -225,7 +228,7 @@ export default function App() {
                   <option>SEQUENTIAL</option>
                   <option>ISAM</option>
                   <option>EXTHASH</option>
-                  <option>BPTREE</option>
+                  <option>BPTREE_CLUSTERED</option>
                   <option>RTREE</option>
                 </select>
               </div>
@@ -304,6 +307,12 @@ export default function App() {
             <div className="kpi small">status: {result?.status ?? "-"}</div>
             <div className="kpi small">filas: {result?.rows ? result.rows.length : 0}</div>
             <div className="kpi small">tiempo: {fmtMs(result?._elapsed_ms)}</div>
+
+            {/* MÉTRICAS I/O */}
+            <div className="kpi small">reads: {m?.reads ?? 0}</div>
+            <div className="kpi small">writes: {m?.writes ?? 0}</div>
+            <div className="kpi small">read_bytes: {m?.read_bytes ?? 0}</div>
+            <div className="kpi small">write_bytes: {m?.write_bytes ?? 0}</div>
           </div>
           <ResultTable rows={result?.rows} />
           {result?.message && (

@@ -4,10 +4,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Callable
 import os, struct, bisect, pickle, sys
 
-
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.core.schema import Schema, Kind
-
+from src.io_counters import count_read, count_write  
 
 PAGE_SIZE   = 4096
 MAGIC       = b"BPTCFS1\0"
@@ -27,11 +26,6 @@ def _key_norm(v: Any, kind: Kind) -> Any:
     if kind == Kind.DATE:
         return str(v)[:10]
     return str(v)
-
-class IOStats:
-    def __init__(self): self.reads = 0; self.writes = 0
-    def reset(self): self.reads = 0; self.writes = 0
-IO = IOStats()
 
 class Disk:
     HEADER_FMT  = "<8sIQQQ"
@@ -53,12 +47,14 @@ class Disk:
         self.f.seek(0)
         hdr = struct.pack(self.HEADER_FMT, MAGIC, VERSION,
                           self.root_pid, self.free_head, self.num_pages)
-        self.f.write(hdr + (b"\x00" * (PAGE_SIZE - len(hdr))))
-        IO.writes += 1
+        data = hdr + (b"\x00" * (PAGE_SIZE - len(hdr)))
+        self.f.write(data)
+        count_write(len(data))  
 
     def _read_header(self):
         self.f.seek(0)
-        raw = self.f.read(PAGE_SIZE); IO.reads += 1
+        raw = self.f.read(PAGE_SIZE)
+        count_read(len(raw))  
         magic, version, self.root_pid, self.free_head, self.num_pages = struct.unpack(
             self.HEADER_FMT, raw[:self.HEADER_SIZE]
         )
@@ -89,12 +85,14 @@ class Disk:
         if len(buf) > PAGE_SIZE:
             raise ValueError("Página excede PAGE_SIZE")
         self.f.seek(pid * PAGE_SIZE)
-        self.f.write(buf + (b"\x00" * (PAGE_SIZE - len(buf))))
-        IO.writes += 1
+        data = buf + (b"\x00" * (PAGE_SIZE - len(buf)))
+        self.f.write(data)
+        count_write(len(data)) 
 
     def read_raw(self, pid: int) -> bytes:
         self.f.seek(pid * PAGE_SIZE)
-        raw = self.f.read(PAGE_SIZE); IO.reads += 1
+        raw = self.f.read(PAGE_SIZE)
+        count_read(len(raw))  
         return raw
 
     def set_root(self, pid: int):
@@ -102,7 +100,8 @@ class Disk:
         self._write_header()
 
     def close(self):
-        self.f.flush(); self.f.close()
+        self.f.flush()
+        self.f.close()
 
 LEAF_HDR_FMT  = "<ciii"
 LEAF_HDR_SIZE = struct.calcsize(LEAF_HDR_FMT)
@@ -164,17 +163,6 @@ def _read_internal(dsk: Disk, pid: int) -> InternalNode:
 def _is_leaf_page(raw: bytes) -> bool:
     return len(raw) >= 1 and raw[0:1] == b"L"
 
-
-
-
-
-
-
-
-
-
-
-
 class BPlusClusteredFile:
     def __init__(self, filename: str, schema: Schema, key_field: str, order_hint: int = ORDER_HINT):
         self.dsk = Disk(filename)
@@ -183,9 +171,6 @@ class BPlusClusteredFile:
         self.key_kind: Kind = next(f.kind for f in schema.fields if f.name == key_field)
         self.order = int(order_hint) if order_hint and order_hint > 3 else ORDER_HINT
         self.block_factor = max(1, (PAGE_SIZE - LEAF_HDR_SIZE) // self.schema.size)
-
-
-
 
 
         if self.dsk.root_pid == 0:
