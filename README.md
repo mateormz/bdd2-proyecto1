@@ -2,6 +2,9 @@
 
 Repo mínimo para levantar la API con Docker Compose.
 
+## Informe y Vide
+- https://drive.google.com/drive/folders/19ZQRmRFhGbwM9wMsyloXNiheqUaLXiYA?usp=sharing
+
 ## Requisitos
 - Docker y Docker Compose
 
