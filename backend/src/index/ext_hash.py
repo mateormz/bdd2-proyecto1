@@ -22,18 +22,23 @@ def _key_norm(v: Any, kind: Kind) -> Any:
 
 class Bucket:
     __slots__ = ("records", "next_bucket", "schema")
-    def __init__(self, records: Optional[List[Dict[str, Any]]] = None, next_bucket: int = -1, schema: Optional[Schema] = None):
+
+    def __init__(self, records: Optional[List[Dict[str, Any]]] = None,
+                 next_bucket: int = -1, schema: Optional[Schema] = None):
         self.records = [] if records is None else records
         self.next_bucket = next_bucket
         self.schema = schema
+
     @property
     def record_size(self) -> int:
         return self.schema.size if self.schema else 0
+
     @property
     def byte_size(self) -> int:
+        # BLOCK_FACTOR * record + next_bucket(int32)
         return BLOCK_FACTOR * self.record_size + 4
+
     def pack(self) -> bytes:
-        count_write()
         data = bytearray()
         for r in self.records[:BLOCK_FACTOR]:
             data += self.schema.pack(r)
@@ -44,9 +49,9 @@ class Bucket:
         if len(data) < self.byte_size:
             data += b"\x00" * (self.byte_size - len(data))
         return bytes(data)
+
     @staticmethod
     def unpack(buf: bytes, schema: Schema) -> "Bucket":
-        count_read()
         rec_size = schema.size
         want = BLOCK_FACTOR * rec_size + 4
         if len(buf) < want:
@@ -74,16 +79,15 @@ def _stable_hash_float(x: float) -> int:
     if x == 0.0: x = 0.0
     bits = struct.unpack("<Q", struct.pack("<d", float(x)))[0]
     bits ^= (bits >> 33)
-    bits *= 0xff51afd7ed558ccd
-    bits &= 0xFFFFFFFFFFFFFFFF
+    bits *= 0xff51afd7ed558ccd; bits &= 0xFFFFFFFFFFFFFFFF
     bits ^= (bits >> 33)
-    bits *= 0xc4ceb9fe1a85ec53
-    bits &= 0xFFFFFFFFFFFFFFFF
+    bits *= 0xc4ceb9fe1a85ec53; bits &= 0xFFFFFFFFFFFFFFFF
     bits ^= (bits >> 33)
     return bits
 
 class ExtendibleHashing:
-    def __init__(self, base_name: str, schema: Schema, key_field: str, hash_function=None, initial_depth: int = DEFAULT_D):
+    def __init__(self, base_name: str, schema: Schema, key_field: str,
+                 hash_function=None, initial_depth: int = DEFAULT_D):
         ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         OUT_DIR = os.path.join(ROOT, "out")
         os.makedirs(OUT_DIR, exist_ok=True)
@@ -107,10 +111,10 @@ class ExtendibleHashing:
         return BLOCK_FACTOR * self.schema.size + 4
 
     def _read_global_depth(self) -> int:
-        count_read()
         try:
             with open(self.filename, "rb") as f:
                 b = f.read(4)
+                count_read(len(b))
                 if len(b) == 4:
                     return struct.unpack("<i", b)[0]
         except Exception:
@@ -118,28 +122,31 @@ class ExtendibleHashing:
         return DEFAULT_D
 
     def _write_global_depth(self, D: int):
-        count_write()
         with open(self.filename, "r+b") as f:
             f.seek(0)
-            f.write(struct.pack("<i", D))
+            buf = struct.pack("<i", D)
+            f.write(buf)
+            count_write(len(buf))
 
     def _bucket_offset(self, index: int) -> int:
         return 4 + index * self._bucket_size()
 
     def _bucket_count_on_disk(self) -> int:
-        count_read()
         size = os.path.getsize(self.filename)
         if size < 4: return 0
         return (size - 4) // self._bucket_size()
 
     def _init_file(self, D: int):
-        count_write()
         self._D = D
         with open(self.filename, "wb") as f:
-            f.write(struct.pack("<i", D))
+            # header
+            hdr = struct.pack("<i", D)
+            f.write(hdr); count_write(len(hdr))
+            # buckets
             empty = Bucket([], -1, self.schema).pack()
             for _ in range(1 << D):
                 f.write(empty)
+                count_write(len(empty))
 
     def _hash(self, key: Any) -> int:
         k = _key_norm(key, self.key_kind)
@@ -152,29 +159,31 @@ class ExtendibleHashing:
         return h & ((1 << self._D) - 1)
 
     def _read_bucket(self, index: int) -> Bucket:
-        count_read()
         with open(self.filename, "rb") as f:
             off = self._bucket_offset(index)
             f.seek(off)
             buf = f.read(self._bucket_size())
+            count_read(len(buf))
         return Bucket.unpack(buf, self.schema)
 
     def _write_bucket(self, index: int, bucket: Bucket):
-        count_write()
+        packed = bucket.pack()
         with open(self.filename, "r+b") as f:
             off = self._bucket_offset(index)
             f.seek(off)
-            f.write(bucket.pack())
+            f.write(packed)
+            count_write(len(packed))
 
     def _append_bucket(self, bucket: Bucket) -> int:
-        count_write()
+        packed = bucket.pack()
         with open(self.filename, "r+b") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
             header = 4
             sz = self._bucket_size()
             index = (size - header) // sz
-            f.write(bucket.pack())
+            f.write(packed)
+            count_write(len(packed))
             return index
 
     def insert(self, record: Dict[str, Any]):
@@ -220,6 +229,7 @@ class ExtendibleHashing:
             pos = 4
             while pos + sz <= file_size:
                 buf = f.read(sz)
+                count_read(len(buf))
                 pos += sz
                 b = Bucket.unpack(buf, self.schema)
                 all_recs.extend(b.records)
@@ -299,7 +309,9 @@ class ExtendibleHashing:
             while True:
                 buf = f.read(sz)
                 if not buf or len(buf) < sz:
+                    if buf: count_read(len(buf))
                     break
+                count_read(len(buf))
                 b = Bucket.unpack(buf, self.schema)
                 for r in b.records:
                     yield r
