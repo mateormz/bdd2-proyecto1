@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os, io, struct, csv
 from typing import Dict, Any, List, Tuple, Optional
+from io_counters import count_read, count_write
 
 def _sfix(text: str, n: int) -> bytes:
     b = str(text).encode('utf-8', errors='ignore')[:n]
@@ -8,16 +9,6 @@ def _sfix(text: str, n: int) -> bytes:
 
 def _sunfix(b: bytes) -> str:
     return b.rstrip(b'\x00').decode('utf-8', errors='ignore')
-
-class IOStats:
-    def __init__(self):
-        self.reads = 0
-        self.writes = 0
-    def reset(self):
-        self.reads = 0
-        self.writes = 0
-
-IO = IOStats()
 
 class EmployeeCodec:
     _STRUCT = struct.Struct('<i30si20s20s20sf10s')
@@ -76,12 +67,12 @@ class DataFile:
             hdr = _DATA_HDR.pack(_DATA_MAGIC, _DATA_VERSION, self.record_size, 0)
             self.f.seek(0); self.f.write(hdr); self.f.flush()
             self.writes += 1
-            IO.writes += 1
+            count_write()
         else:
             self.f.seek(0)
             hdr = self.f.read(_DATA_HDR.size)
             self.reads += 1
-            IO.reads += 1
+            count_read()
             magic, ver, rs, _ = _DATA_HDR.unpack(hdr)
             if magic != _DATA_MAGIC or ver != _DATA_VERSION or rs != self.record_size:
                 raise ValueError("Encabezado inválido en archivo de datos")
@@ -92,24 +83,24 @@ class DataFile:
         off = self.f.tell()
         self.f.write(rec_bytes); self.f.flush()
         self.writes += 1
-        IO.writes += 1
+        count_write()
         return off
     def read_at(self, off: int) -> bytes:
         self.f.seek(off)
         b = self.f.read(self.record_size)
         self.reads += 1
-        IO.reads += 1
+        count_read()
         return b
     def rewrite_all(self, records: List[Tuple[int, bytes]]):
         self.f.seek(0)
         hdr = _DATA_HDR.pack(_DATA_MAGIC, _DATA_VERSION, self.record_size, 0)
         self.f.write(hdr)
-        IO.writes += 1
         self.writes += 1
+        count_write()
         for _, b in records:
             self.f.write(b)
             self.writes += 1
-            IO.writes += 1
+            count_write()
         self.f.flush()
     def close(self): self.f.close()
 
@@ -128,13 +119,13 @@ class IndexFile:
             hdr = _INDEX_HDR.pack(_INDEX_MAGIC, _INDEX_VERSION, _NODE_SIZE, 0, 0)
             self.f.seek(0); self.f.write(hdr); self.f.flush()
             self.writes += 1
-            IO.writes += 1
+            count_write()
         self._read_header()
     def _read_header(self):
         self.f.seek(0)
         hdr = self.f.read(_INDEX_HDR.size)
         self.reads += 1
-        IO.reads += 1
+        count_read()
         magic, ver, node_size, root_off, count = _INDEX_HDR.unpack(hdr)
         self.root_off, self.count = root_off, count
     def _write_header(self, root_off=None, count=None):
@@ -143,26 +134,26 @@ class IndexFile:
         hdr = _INDEX_HDR.pack(_INDEX_MAGIC, _INDEX_VERSION, _NODE_SIZE, root_off or 0, count or 0)
         self.f.seek(0); self.f.write(hdr); self.f.flush()
         self.writes += 1
-        IO.writes += 1
+        count_write()
         self.root_off, self.count = root_off or 0, count or 0
     def _alloc_node(self, key: int, value_off: int, height=1, left_off=0, right_off=0) -> int:
         self.f.seek(0, io.SEEK_END)
         off = self.f.tell()
         self.f.write(_NODE.pack(key, height, left_off, right_off, value_off)); self.f.flush()
         self.writes += 1
-        IO.writes += 1
+        count_write()
         return off
     def read_node(self, off: int) -> Tuple[int, int, int, int, int]:
         self.f.seek(off)
         b = self.f.read(_NODE.size)
         self.reads += 1
-        IO.reads += 1
+        count_read()
         return _NODE.unpack(b)
     def write_node(self, off: int, k: int, h: int, l: int, r: int, v: int):
         self.f.seek(off)
         self.f.write(_NODE.pack(k, h, l, r, v)); self.f.flush()
         self.writes += 1
-        IO.writes += 1
+        count_write()
     def close(self): self.f.close()
 
 def _height(idx: IndexFile, off: int) -> int:
@@ -277,7 +268,5 @@ class AVLFile:
             "data_reads": self.data.reads,
             "data_writes": self.data.writes,
             "index_reads": self.index.reads,
-            "index_writes": self.index.writes,
-            "global_reads": IO.reads,
-            "global_writes": IO.writes
+            "index_writes": self.index.writes
         }

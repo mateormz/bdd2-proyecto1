@@ -3,21 +3,12 @@ import os, math, bisect, pickle, struct
 from typing import Any, Dict, List, Iterable, Callable, Tuple
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from src.core.schema import Schema, Field, Kind
+from core.schema import Schema, Field, Kind
+from io_counters import count_read, count_write
 
 PAGE_SIZE = 4096
 PAGE_HEADER_FMT = "<ii"
 PAGE_HEADER_SIZE = struct.calcsize(PAGE_HEADER_FMT)
-
-class IOStats:
-    def __init__(self):
-        self.reads = 0
-        self.writes = 0
-    def reset(self):
-        self.reads = 0
-        self.writes = 0
-
-IO = IOStats()
 
 def _key_norm(v: Any, kind: Kind) -> Any:
     if v is None:
@@ -33,7 +24,6 @@ def _key_norm(v: Any, kind: Kind) -> Any:
         s = str(v).strip()[:10]
         return s if len(s) == 10 else "0001-01-01"
     return str(v)
-
 
 class Page:
     def __init__(self, schema: Schema, records: List[Dict[str, Any]] = None, next_page: int = -1):
@@ -62,7 +52,6 @@ class Page:
             off += schema.size
         return Page(schema, recs, next_page)
 
-
 class SparseIndex:
     def __init__(self, path: str):
         self.path = path
@@ -70,14 +59,14 @@ class SparseIndex:
     def write(self, entries: List[Tuple[Any, int]]):
         with open(self.path, "wb") as f:
             pickle.dump(entries, f, protocol=pickle.HIGHEST_PROTOCOL)
-            IO.writes += 1
+            count_write()
 
     def read(self) -> List[Tuple[Any, int]]:
         if not os.path.exists(self.path):
             return []
         with open(self.path, "rb") as f:
             data = pickle.load(f)
-            IO.reads += 1
+            count_read()
             return data
 
     @staticmethod
@@ -85,7 +74,6 @@ class SparseIndex:
         keys = [k for k, _ in entries]
         pos = bisect.bisect_right(keys, key) - 1
         return max(0, pos)
-
 
 class SequentialOrderedFile:
     def __init__(self, base_filename: str, schema: Schema, key_field: str):
@@ -99,7 +87,6 @@ class SequentialOrderedFile:
         self.BLOCK_FACTOR = max(1, (PAGE_SIZE - PAGE_HEADER_SIZE) // schema.size)
         self.aux: List[Dict[str, Any]] = []
         self.K = 16
-
         if not os.path.exists(self.data_path):
             open(self.data_path, "wb").close()
 
@@ -117,7 +104,7 @@ class SequentialOrderedFile:
                 buf = page.pack(self.BLOCK_FACTOR)
                 pad = self._page_bytes() - len(buf)
                 f.write(buf + (b"\x00" * pad))
-                IO.writes += 1
+                count_write()
                 entries.append((_key_norm(chunk[0][self.key_field], self.key_kind), pid))
                 pid += 1
         self.sparse.write(entries)
@@ -126,7 +113,7 @@ class SequentialOrderedFile:
         with open(self.data_path, "rb") as f:
             f.seek(pid * self._page_bytes())
             buf = f.read(self._page_bytes())
-            IO.reads += 1
+            count_read()
         return Page.unpack(buf, self.schema)
 
     def search(self, key: Any) -> List[Dict[str, Any]]:
@@ -190,7 +177,7 @@ class SequentialOrderedFile:
                 off = pid * self._page_bytes()
                 f.seek(off)
                 buf = f.read(self._page_bytes())
-                IO.reads += 1
+                count_read()
                 page = Page.unpack(buf, self.schema)
                 new_recs = []
                 for r in page.records:
@@ -204,7 +191,7 @@ class SequentialOrderedFile:
                 pad = self._page_bytes() - len(new_buf)
                 f.seek(off)
                 f.write(new_buf + (b"\x00" * pad))
-                IO.writes += 1
+                count_write()
         new_entries: List[Tuple[Any, int]] = []
         for pid in range(len(entries)):
             page = self._read_page(pid)
