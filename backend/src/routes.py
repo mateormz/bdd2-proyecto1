@@ -7,9 +7,9 @@ import time
 
 from src.engine import Engine
 from src.parser_sql import IndexType
+from src.io_counters import reset_counters, get_counters  # <<<< IMPORTANTE
 
 eng = Engine()
-
 router = APIRouter()
 
 
@@ -27,7 +27,6 @@ class LoadCSVRequest(BaseModel):
 
 class SpatialRangeRequest(BaseModel):
     table: str
-    # se acepta 2D [x,y] o 3D [x,y,z]; radio opcional
     point: List[float] = Field(..., description="[x,y] o [x,y,z]")
     radius: Optional[float] = None
     coord_column: str = "x"
@@ -38,8 +37,8 @@ class SpatialKNNRequest(BaseModel):
     k: int = 5
     coord_column: str = "x"
 
-# Helpers
 
+# Helpers
 def _normalize_index(name: str) -> IndexType:
     n = (name or "").upper()
     mapping = {
@@ -67,16 +66,17 @@ def _as_sql_value(v: Any) -> str:
         return f"[{inner}]"
     return str(v)
 
+
+# Endpoints
 @router.post("/sql")
 def execute_sql(req: SQLQuery):
-    """
-    Ejecuta SQL libre contra el Engine (usa tu parser_sql y engine.execute).
-    Devuelve {status, rows, message}, igual a engine.execute, con timing.
-    """
     t0 = time.perf_counter()
     try:
+        reset_counters()  # << reset contadores
         result = eng.execute(req.query)
-        result["_elapsed_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+        elapsed = (time.perf_counter() - t0) * 1000
+        result["_elapsed_ms"] = round(elapsed, 2)
+        result["metrics"] = get_counters()  # << añade métricas
         return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -84,9 +84,6 @@ def execute_sql(req: SQLQuery):
 
 @router.get("/tables")
 def list_tables():
-    """
-    Lista tablas registradas en el Engine (name, key, idx_type, columns).
-    """
     out = []
     for name, th in eng.tables.items():
         out.append({
@@ -115,16 +112,21 @@ async def upload_csv(file: UploadFile = File(...)):
 def load_csv(req: LoadCSVRequest):
     idx = _normalize_index(req.index_type)
 
-    # Validación simple existencia del CSV
     if not os.path.exists(req.csv_path):
         raise HTTPException(status_code=400, detail=f"No existe el archivo: {req.csv_path}")
+
     sql = (
         f'CREATE TABLE {req.table_name} FROM FILE "{req.csv_path}" '
         f'USING INDEX {idx.name}("{req.key_column}")'
     )
 
     try:
+        reset_counters()
+        t0 = time.perf_counter()
         result = eng.execute(sql)
+        elapsed = (time.perf_counter() - t0) * 1000
+        result["_elapsed_ms"] = round(elapsed, 2)
+        result["metrics"] = get_counters()
         return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -132,18 +134,21 @@ def load_csv(req: LoadCSVRequest):
 
 @router.post("/spatial/range")
 def spatial_range(req: SpatialRangeRequest):
-
     p = req.point
     if len(p) not in (2, 3):
         raise HTTPException(status_code=400, detail="point debe ser [x,y] o [x,y,z]")
-    if req.radius is not None:
-        arr = [*p, float(req.radius)]
-    else:
-        arr = p
 
+    arr = [*p, float(req.radius)] if req.radius is not None else p
     sql = f"SELECT * FROM {req.table} WHERE {req.coord_column} IN (point, {_as_sql_value(arr)})"
+
     try:
-        return eng.execute(sql)
+        reset_counters()
+        t0 = time.perf_counter()
+        result = eng.execute(sql)
+        elapsed = (time.perf_counter() - t0) * 1000
+        result["_elapsed_ms"] = round(elapsed, 2)
+        result["metrics"] = get_counters()
+        return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -155,7 +160,14 @@ def spatial_knn(req: SpatialKNNRequest):
         raise HTTPException(status_code=400, detail="point debe ser [x,y] o [x,y,z]")
 
     sql = f"SELECT * FROM {req.table} WHERE {req.coord_column} IN ({req.k}, {_as_sql_value(p)})"
+
     try:
-        return eng.execute(sql)
+        reset_counters()
+        t0 = time.perf_counter()
+        result = eng.execute(sql)
+        elapsed = (time.perf_counter() - t0) * 1000
+        result["_elapsed_ms"] = round(elapsed, 2)
+        result["metrics"] = get_counters()
+        return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
