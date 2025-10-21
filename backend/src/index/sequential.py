@@ -57,17 +57,19 @@ class SparseIndex:
         self.path = path
 
     def write(self, entries: List[Tuple[Any, int]]):
+        # Serializa primero para contar bytes exactamente.
+        buf = pickle.dumps(entries, protocol=pickle.HIGHEST_PROTOCOL)
         with open(self.path, "wb") as f:
-            pickle.dump(entries, f, protocol=pickle.HIGHEST_PROTOCOL)
-            count_write()
+            f.write(buf)
+        count_write(len(buf))  # <-- bytes escritos
 
     def read(self) -> List[Tuple[Any, int]]:
         if not os.path.exists(self.path):
             return []
         with open(self.path, "rb") as f:
-            data = pickle.load(f)
-            count_read()
-            return data
+            raw = f.read()
+        count_read(len(raw))  # <-- bytes leídos
+        return pickle.loads(raw)
 
     @staticmethod
     def locate(entries: List[Tuple[Any, int]], key: Any) -> int:
@@ -104,7 +106,7 @@ class SequentialOrderedFile:
                 buf = page.pack(self.BLOCK_FACTOR)
                 pad = self._page_bytes() - len(buf)
                 f.write(buf + (b"\x00" * pad))
-                count_write()
+                count_write(self._page_bytes())  # <-- cuenta bytes de página completa
                 entries.append((_key_norm(chunk[0][self.key_field], self.key_kind), pid))
                 pid += 1
         self.sparse.write(entries)
@@ -113,7 +115,7 @@ class SequentialOrderedFile:
         with open(self.data_path, "rb") as f:
             f.seek(pid * self._page_bytes())
             buf = f.read(self._page_bytes())
-            count_read()
+        count_read(self._page_bytes())  # <-- bytes leídos de la página
         return Page.unpack(buf, self.schema)
 
     def search(self, key: Any) -> List[Dict[str, Any]]:
@@ -177,8 +179,9 @@ class SequentialOrderedFile:
                 off = pid * self._page_bytes()
                 f.seek(off)
                 buf = f.read(self._page_bytes())
-                count_read()
+                count_read(self._page_bytes())  # <-- bytes leídos
                 page = Page.unpack(buf, self.schema)
+
                 new_recs = []
                 for r in page.records:
                     k = _key_norm(r[self.key_field], self.key_kind)
@@ -187,11 +190,14 @@ class SequentialOrderedFile:
                         continue
                     new_recs.append(r)
                 page.records = new_recs
+
                 new_buf = page.pack(self.BLOCK_FACTOR)
                 pad = self._page_bytes() - len(new_buf)
                 f.seek(off)
                 f.write(new_buf + (b"\x00" * pad))
-                count_write()
+                count_write(self._page_bytes())  # <-- bytes escritos
+
+        # Reescribir sparse index (ya cuenta bytes con SparseIndex.write)
         new_entries: List[Tuple[Any, int]] = []
         for pid in range(len(entries)):
             page = self._read_page(pid)
